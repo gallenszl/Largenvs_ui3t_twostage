@@ -442,6 +442,11 @@ def main():
     torch.backends.cudnn.allow_tf32 = True
     t0 = time.time()
     os.chdir(REPO)
+    import torch.distributed as dist          # model/loss.py calls torch.distributed at init
+    if not dist.is_initialized():
+        os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+        os.environ.setdefault("MASTER_PORT", str(29000 + int(os.environ.get("SLURM_JOB_ID", "0")) % 997))
+        dist.init_process_group("gloo", rank=0, world_size=1)
     cfgs, model, dsets = build(args.config, args.ckpt, dev)
     amp = dict(enabled=True, device_type="cuda", dtype=torch.bfloat16)
     res = json.load(open(args.out)) if os.path.exists(args.out) else {}
