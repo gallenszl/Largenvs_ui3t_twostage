@@ -1,0 +1,146 @@
+model:
+  class_name: model.vggt.models.RnG.VGGT4LVSM
+
+  image_tokenizer:
+    image_size: 448
+    patch_size: 14
+    in_channels: 9  # 3 RGB + 3 direction + 3 Reference
+
+  target_pose_tokenizer:
+    image_size: 448
+    patch_size: 14
+    in_channels: 6  # 3 direction + 3 Reference
+
+  pretrained_path: /home/z50057756/model/VGGT/model.pt
+
+  rae_decoder:
+    config_path: /home/z50057756/code/RAE/configs/decoder/ViTXL
+    pretrained_decoder_path: /home/z50057756/model/RAE/decoders/dinov2/wReg_base/ViTXL_n08_i512/model.pt
+    normalization_stat_path: /home/z50057756/model/RAE/stats/dinov2/wReg_base/imagenet1k_512/stat.pt
+    latent_dim: 768
+    decoder_patch_size: 16
+
+exp_name:
+  RnGUP_obj_448_render44798
+
+unposed: true
+
+training:
+  amp_dtype: bf16
+  use_bf16: true # can only set transformer weights to bf16, DPT head must use float32
+  api_key_path: ./configs/api_keys.yaml
+  batch_size_per_gpu: 8
+  beta1: 0.9
+  beta2: 0.95
+  allowed_gradnorm_factor: 5000
+  checkpoint_dir: ./experiments/checkpoints/${exp_name}
+  checkpoint_every: 2000
+  dataset_name: data.dataset_objaverse.ObjaverseDataset
+  # P5: our newly-rendered Objaverse meshes (sim2real A1/A2/A3/R2 patches baked in).
+  # P7: filtered list = original 44,798 minus 413 obj whose 40-view alpha fg_mean < 0.005
+  #     (broken / near-empty renders; full audit at <data_root>/fg_audit_full.json).
+  dataset_path: data/objaverse_44385.txt
+  root_path: /home/z50057756/data/objaverse_renders_44798
+  use_tar: true
+  tar_root_path: /home/z50057756/data/objaverse_renders_44798
+  # P2: per-view camera roll augment (R1 sim2real). 10 deg matches plan section 1.1 R1.
+  roll_augment_max_deg: 10.0
+  grad_accum_steps: 1
+  grad_checkpoint_every: 1
+  grad_clip_norm: 1.0
+
+  l2_loss_weight: 1.0
+  lpips_loss_weight: 0.0
+  perceptual_loss_weight: 0.5
+
+  ### for reconstruction
+  weight_camera: 1.0
+  weight_point: 0.2
+
+  # lr: 0.0004
+  lr: 0.0006
+  train_steps: 15000
+
+  # P3: 44,798 renders 每 obj 40 view 可用。
+  total_frames_per_obj: 40
+  num_input_views: 4
+  num_target_views: 3
+  num_threads: 8
+  # num_views=7 = num_input + num_target。每次 __getitem__ 从 40 里随机抽 7,
+  # 只 load+augment 那 7 个。跨多个 epoch 同一 obj 被 sample 到不同的 7,target
+  # 期望覆盖全 40 view。dataloader 工作量降到 baseline 同等水平(对比 num_views=40
+  # 是 5.7× 少),iter time ~7s(实测 baseline FluffyElephant 也是 ~7s)。
+  num_views: 7
+  num_workers: 8
+  prefetch_factor: 4
+  print_every: 20
+
+  square_crop: true
+  # target_has_input 现在是 fallback,当 target_has_input_prob 未设时使用。
+  target_has_input: true
+  # P6: per-sample target 选择模式 — 10% 概率 overlap (target 可与 input 重叠,
+  # 走 target_has_input=true 的语义);90% 概率 disjoint (target = 后 num_target_views,
+  # 跟 input 严格 disjoint, 走 target_has_input=false 的语义)。
+  target_has_input_prob: 0.1
+  use_amp: true
+  use_rel_pose: false
+  use_tf32: true
+  view_selector:
+    max_frame_dist: 192
+    min_frame_dist: 25
+  vis_every: 200
+  wandb_exp_name: ${exp_name}
+  wandb_log_every: 50
+  
+  wandb_project: LVSM_obj
+  warmup: 3000
+  weight_decay: 0.05
+
+  # RAE decoder 渐进解冻: 0 = 从开始不冻结, 0.001 = 0.1%后解冻, 0.2 = 20%后解冻
+  unfreeze_rae_decoder_at: 1.05
+
+  # RAE decoder differential learning rate (lower lr to preserve pretrained features)
+  decoder_lr: 0.00003
+  decoder_weight_decay: 0.01
+
+  # REPA-style feature alignment (target view only)
+  # Phase 1: flips all 4 broken knobs from prior failed `rae_latent` experiment
+  #   layer_idx=7  -> 8th of 24 aggregator blocks (~33% depth, REPA sweet spot)
+  #   weight=0.5   -> matches REPA / iREPA default
+  #   target encoder = DINOv3-ViT-L (different family than DINOv2 backbone)
+  #   target_resolution=512 -> DINOv3 grid 32x32 matches aggregator 448/14=32 exactly
+  #                            (no spatial interpolation on z_pred, per-token 1:1 supervision)
+  #   projector = Conv2d(1024, 1024, k=3, p=1)  [in code]
+  #   loss      = negative cosine similarity    [in code]
+  feature_alignment:
+    enabled: true
+    layer_idx: 7           # was 7 (Phase 1, 33% depth) → now 17 (Exp 9, 71% depth)
+    weight: 0.5
+    only_target_view: true
+    target_encoder_weights: /home/z50057756/.cache/torch/hub/checkpoints/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth
+    target_encoder_hub_dir: /home/z50057756/.cache/torch/hub/facebookresearch_dinov3_94a96ac83c2446f15f9bdcfae23cad3c6a9d4988
+    target_resolution: 512
+
+  # val_dataset_name: data.dataset_gso.GSODataset
+  val_dataset_name: data.dataset_gso_ours.GSODataset_ours
+  validation_out_dir: ./experiments/checkpoints/${exp_name}
+  val_dataset_cfgs:
+    root_dir: /home/z50057756/FluffyElephant/gso_render_rv
+    suffix: render_mvs_25/model/
+    split_file: data/gso_subset64.txt
+    # split_file: data/gso.txt
+    if_inference: True
+    # image_size: 256
+    # patch_size: 8
+
+    # for model.process_val_data
+    training:
+      batch_size_per_gpu: 1
+      num_views: 14
+      num_input_views: 4
+      num_target_views: 10
+      target_has_input: false
+
+inference:
+  render_video: False
+  compute_metrics: True

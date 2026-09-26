@@ -1,0 +1,97 @@
+model:
+  class_name: model.lagernvs_wrapper.LagerNVSInRnG
+  image_tokenizer:
+    image_size: 256
+    patch_size: 8
+    in_channels: 9
+  target_pose_tokenizer:
+    image_size: 256
+    patch_size: 8
+    in_channels: 6
+  pretrained_path: /home/z50057756/model/VGGT/model.pt
+  rae_decoder:
+    config_path: /home/z50057756/code/RAE/configs/decoder/ViTXL
+    pretrained_decoder_path: /home/z50057756/model/RAE/decoders/dinov2/wReg_base/ViTXL_n08_i512/model.pt
+    normalization_stat_path: /home/z50057756/model/RAE/stats/dinov2/wReg_base/imagenet1k_512/stat.pt
+    latent_dim: 768
+    decoder_patch_size: 16
+exp_name: PLN2pose_v2color_rgb256_15k
+unposed: true
+training:
+  amp_dtype: bf16
+  use_bf16: true
+  api_key_path: ./configs/api_keys.yaml
+  batch_size_per_gpu: 8
+  beta1: 0.9
+  beta2: 0.95
+  allowed_gradnorm_factor: 5000
+  checkpoint_dir: ./experiments/checkpoints/${exp_name}
+  checkpoint_every: 2000
+  dataset_name: data.dataset_objaverse.ObjaverseDataset
+  dataset_path: data/objaverse_44798_v2_color.txt
+  root_path: /mnt/data-alpha-sg-01/team-camera/home/z50057756/data/objaverse_renders_44798_v2
+  use_tar: true
+  tar_root_path: /mnt/data-alpha-sg-01/team-camera/home/z50057756/data/objaverse_renders_44798_v2
+  roll_augment_max_deg: 10.0
+  grad_accum_steps: 1
+  grad_checkpoint_every: 1
+  grad_clip_norm: 1.0
+  l2_loss_weight: 1.0
+  lpips_loss_weight: 0.0
+  perceptual_loss_weight: 0.5
+  weight_camera: 0.0
+  weight_point: 0.0
+  lr: 0.0001
+  train_steps: 15000
+  total_frames_per_obj: 40
+  num_input_views: 4
+  num_target_views: 3
+  num_threads: 8
+  num_views: 7
+  num_workers: 8
+  prefetch_factor: 4
+  print_every: 20
+  square_crop: true
+  target_has_input: true
+  target_has_input_prob: 0.1
+  use_amp: true
+  use_rel_pose: false
+  use_tf32: true
+  view_selector:
+    max_frame_dist: 192
+    min_frame_dist: 25
+  vis_every: 200
+  wandb_exp_name: ${exp_name}
+  wandb_log_every: 50
+  wandb_project: PLN2_lagernvs
+  warmup: 3000
+  weight_decay: 0.05
+  unfreeze_rae_decoder_at: 1.05
+  decoder_lr: 3.0e-05
+  decoder_weight_decay: 0.01
+  feature_alignment:
+    enabled: false
+    layer_idx: 7
+    weight: 0.5
+    only_target_view: true
+    target_encoder_weights: /home/z50057756/.cache/torch/hub/checkpoints/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth
+    target_encoder_hub_dir: /home/z50057756/.cache/torch/hub/facebookresearch_dinov3_94a96ac83c2446f15f9bdcfae23cad3c6a9d4988
+    target_resolution: 512
+  val_dataset_name: data.dataset_gso_ours.GSODataset_ours
+  validation_out_dir: ./experiments/checkpoints/${exp_name}
+  val_dataset_cfgs:
+    root_dir: /home/z50057756/data/gso_sim2real_25v
+    suffix: ''
+    split_file: data/gso_subset64.txt
+    if_inference: true
+    training:
+      batch_size_per_gpu: 1
+      num_views: 14
+      num_input_views: 4
+      num_target_views: 10
+      target_has_input: false
+  cam_cond_zero_p: 0.4
+  val_cam_cond_zero_p: 1.0
+inference:
+  render_video: false
+  compute_metrics: true

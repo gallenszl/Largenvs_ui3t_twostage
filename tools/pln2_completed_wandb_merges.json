@@ -1,0 +1,48 @@
+{
+  "entity": "szlgallen-peking-university",
+  "project": "PLN2_lagernvs",
+  "experiments": [
+    {
+      "name": "PLN2pose_v2color_15k_gauge",
+      "canonical_name": "PLN2pose_v2color_15k_gauge [MERGED]",
+      "artifact_name": "pln2pose-v2color-15k-gauge-merge",
+      "checkpoint_dir": "experiments/checkpoints/PLN2pose_v2color_15k_gauge",
+      "expected_final_step": 15000,
+      "expected_validation_scenes": 64,
+      "expected_validation_steps": [2000, 4000, 6000, 8000, 10000, 12000, 14000, 15000],
+      "discarded_run_ids": ["isvk3t1l", "s803czas"],
+      "segments": [
+        {"run_id": "jwqiwxon", "start_step": 1, "end_step": 14000},
+        {"run_id": "dsip4zvl", "start_step": 14001, "end_step": 15000}
+      ]
+    },
+    {
+      "name": "PLN2pose_v2color_15k_tgt6",
+      "canonical_name": "PLN2pose_v2color_15k_tgt6 [MERGED]",
+      "artifact_name": "pln2pose-v2color-15k-tgt6-merge",
+      "checkpoint_dir": "experiments/checkpoints/PLN2pose_v2color_15k_tgt6",
+      "expected_final_step": 15000,
+      "expected_validation_scenes": 64,
+      "expected_validation_steps": [2000, 4000, 6000, 8000, 10000, 12000, 14000, 15000],
+      "discarded_run_ids": ["01re3prf", "05hu4kt4", "7r2jetyz"],
+      "segments": [
+        {"run_id": "zfw4okfu", "start_step": 1, "end_step": 6000},
+        {"run_id": "a8fud8es", "start_step": 6001, "end_step": 15000}
+      ]
+    },
+    {
+      "name": "PLN2pose_v2color_15k_thip0625",
+      "canonical_name": "PLN2pose_v2color_15k_thip0625 [MERGED]",
+      "artifact_name": "pln2pose-v2color-15k-thip0625-merge",
+      "checkpoint_dir": "experiments/checkpoints/PLN2pose_v2color_15k_thip0625",
+      "expected_final_step": 15000,
+      "expected_validation_scenes": 64,
+      "expected_validation_steps": [2000, 4000, 6000, 8000, 10000, 12000, 14000, 15000],
+      "discarded_run_ids": [],
+      "segments": [
+        {"run_id": "kkt4iu8b", "start_step": 1, "end_step": 8000},
+        {"run_id": "ga6excvk", "start_step": 8001, "end_step": 15000}
+      ]
+    }
+  ]
+}
