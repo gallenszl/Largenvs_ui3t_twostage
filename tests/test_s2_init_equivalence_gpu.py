@@ -131,6 +131,8 @@ class InitEquivalenceTests(unittest.TestCase):
         m = self.m8
         s1_params = [p for _, p in list(m.stage1.model.named_parameters())[::50]]
         before = tensor_hash(s1_params)
+        # the class fixture must stay at init for the other tests (unittest runs them alphabetically)
+        saved = {k: v.detach().clone() for k, v in m.state_dict().items()}
         opt, _, _ = create_optimizer(m, 0.05, 3.5e-5, (0.9, 0.95))
         m.train()
         try:
@@ -148,7 +150,9 @@ class InitEquivalenceTests(unittest.TestCase):
             self.assertGreater(float(m.renderer.out_lin[3].weight.grad.abs().max()), 0.0)
             opt.step()
             opt.zero_grad(set_to_none=True)
+            self.assertGreater(float(m.renderer.out_lin[3].weight.abs().max()), 0.0)   # the step moved Lin_m
         finally:
+            m.load_state_dict(saved)
             m.eval()
         self.assertEqual(before, tensor_hash(s1_params))
         self.assertTrue(all(p.dtype == torch.float32 for p in m.parameters() if p.requires_grad))
