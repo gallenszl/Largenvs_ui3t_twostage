@@ -40,7 +40,7 @@ def cached_batches(cfg, n):
     return out
 
 
-def run_leg(model, opt, batches, warmup, steps):
+def run_leg(model, opt, batches, warmup, steps, label):
     model.train()
     times = []
     torch.cuda.reset_peak_memory_stats()
@@ -54,11 +54,76 @@ def run_leg(model, opt, batches, warmup, steps):
         opt.step()
         opt.zero_grad(set_to_none=True)
         torch.cuda.synchronize()
+        dt = time.perf_counter() - t0
         if i >= warmup:
-            times.append(time.perf_counter() - t0)
+            times.append(dt)
+        if (i + 1) % 25 == 0:                         # progress for the 5-minute watchdog
+            print(f"[s2-bench] {label} step {i + 1}/{warmup + steps} last {dt:.2f}s "
+                  f"peak {torch.cuda.max_memory_allocated() / 2 ** 30:.1f}GB", flush=True)
     t = np.array(times)
     return dict(median_s=float(np.median(t)), p90_s=float(np.percentile(t, 90)), mean_s=float(t.mean()),
                 peak_gb=torch.cuda.max_memory_allocated() / 2 ** 30, steps=int(len(t)))
+
+
+def breakdown(model, opt, batches, n=10):
+    """GPU time per step of each part (CUDA events; parts called several times per step are summed)."""
+    import model_s2.geometry as geo
+    import model_s2.stage2_wrapper as w
+    acc = {}
+
+    def wrap(obj, name, label):
+        fn = getattr(obj, name)
+
+        def timed(*a, **k):
+            s, e = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+            s.record()
+            out = fn(*a, **k)
+            e.record()
+            acc.setdefault(label, []).append((s, e))
+            return out
+        setattr(obj, name, timed)
+        return obj, name, fn
+
+    patches = [wrap(model.stage1, "pass1", "stage-1 pass 1 (no grad)"),
+               wrap(model.stage1, "pass2", "stage-1 pass 2 (no grad)"),
+               wrap(geo, "build_layout", "layout + mask tables"),
+               wrap(geo, "build_forward_table", "layout + mask tables"),
+               wrap(geo, "build_reverse_table", "layout + mask tables"),
+               wrap(w, "MaskTable", "layout + mask tables"),
+               wrap(model.renderer, "forward", "stage-2 renderer forward"),
+               wrap(w, "render_color", "heads forward"),
+               wrap(w, "render_points", "heads forward"),
+               wrap(model.loss_computer, "forward", "loss forward")]
+    whole = {"forward (all)": [], "backward": [], "optimizer": []}
+    try:
+        model.train()
+        for i in range(n):
+            b = batches[i % len(batches)]
+            ev = [torch.cuda.Event(enable_timing=True) for _ in range(4)]
+            ev[0].record()
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                out = model(b)
+            ev[1].record()
+            out.loss_metrics.loss.backward()
+            ev[2].record()
+            opt.step()
+            opt.zero_grad(set_to_none=True)
+            ev[3].record()
+            torch.cuda.synchronize()
+            whole["forward (all)"].append(ev[0].elapsed_time(ev[1]))
+            whole["backward"].append(ev[1].elapsed_time(ev[2]))
+            whole["optimizer"].append(ev[2].elapsed_time(ev[3]))
+    finally:
+        import types
+        for obj, name, fn in patches:
+            if isinstance(obj, types.ModuleType):
+                setattr(obj, name, fn)                  # module-level function / class: put the original back
+            else:
+                vars(obj).pop(name, None)               # instance attribute shadowing the method: remove it
+    res = {k: float(np.mean(v)) for k, v in whole.items()}
+    for k, v in acc.items():
+        res[k] = float(sum(s.elapsed_time(e) for s, e in v) / n)
+    return res
 
 
 def main():
@@ -66,7 +131,7 @@ def main():
     ap.add_argument("--configs", required=True)
     ap.add_argument("--backends", default="sdpa,flex")
     ap.add_argument("--batch", type=int, default=8)
-    ap.add_argument("--n_batches", type=int, default=6)
+    ap.add_argument("--n_batches", type=int, default=12)
     ap.add_argument("--warmup", type=int, default=100)
     ap.add_argument("--steps", type=int, default=200)
     ap.add_argument("--out", required=True)
@@ -95,8 +160,11 @@ def main():
         for bk in todo:
             model.masked_backend = bk
             t0 = time.time()
-            r = run_leg(model, opt, batches, args.warmup, args.steps)
+            r = run_leg(model, opt, batches, args.warmup, args.steps, f"{tag} {bk}")
             r["wall_s"] = time.time() - t0
+            r["breakdown_ms"] = breakdown(model, opt, batches)
+            print(f"[s2-bench] {tag} {bk} breakdown (ms/step): "
+                  + ", ".join(f"{k} {v:.0f}" for k, v in r["breakdown_ms"].items()), flush=True)
             res[f"{tag}_{bk}"] = r
             print(f"[s2-bench] {tag} {bk}: median {r['median_s']:.3f}s p90 {r['p90_s']:.3f}s "
                   f"peak {r['peak_gb']:.1f}GB", flush=True)

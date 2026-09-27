@@ -3,7 +3,7 @@
 #   s2_watch.sh <jobid> <out.log> <err.log> [interval_s=300] [stall_polls=4]
 # exit 0 = COMPLETED; 1 = other terminal state; 2 = failure signature in the logs; 3 = stalled (no log growth)
 JOB=$1; OUT=$2; ERR=$3; IV=${4:-300}; STALL=${5:-4}
-SIG='Traceback|^FAIL:|^ERROR:|RuntimeError|out of memory|OutOfMemory|illegal memory access|CUDA error|NaN or Inf loss|GATE.*FAIL|\[resume\]|Killed|NCCL error|EDQUOT|No space left|ImportError|ModuleNotFoundError|API key'
+SIG='Traceback|^FAIL:|^ERROR:|RuntimeError|out of memory|OutOfMemory|illegal memory access|CUDA error|NaN or Inf loss|GATE.*FAIL|\[resume\]|Killed|NCCL error|EDQUOT|No space left|ImportError|ModuleNotFoundError|API key|cache_size_limit|recompile_limit'
 seen=0; last=-1; flat=0
 while true; do
   st=$(sacct -j "$JOB" -X -n -o State 2>/dev/null | head -1 | awk '{print $1}')

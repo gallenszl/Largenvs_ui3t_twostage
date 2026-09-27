@@ -7,7 +7,7 @@
 #SBATCH --gres=gpu:h200:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=180G
-#SBATCH --time=02:30:00
+#SBATCH --time=03:30:00
 #SBATCH --no-requeue
 #SBATCH --output=/home/z50057756/code/RnG_lagernvs_stage2/slurm_logs/%x-%j.out
 #SBATCH --error=/home/z50057756/code/RnG_lagernvs_stage2/slurm_logs/%x-%j.err

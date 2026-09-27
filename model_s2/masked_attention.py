@@ -114,6 +114,12 @@ def _flex_attend(q, k, v, mask):
     global _compiled_flex
     from torch.nn.attention.flex_attention import flex_attention
     if _compiled_flex is None:
+        # one graph per (Lq | Kr) padding bucket, train and validation batch sizes, forward and reverse call sites:
+        # far above dynamo's default recompile limit of 8, past which it silently falls back to an unfused path
+        import torch._dynamo
+        for key in ("cache_size_limit", "recompile_limit"):
+            if hasattr(torch._dynamo.config, key):
+                setattr(torch._dynamo.config, key, max(64, getattr(torch._dynamo.config, key)))
         _compiled_flex = torch.compile(flex_attention, dynamic=False)
     o = _compiled_flex(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), block_mask=mask.block_mask)
     return o.transpose(1, 2)

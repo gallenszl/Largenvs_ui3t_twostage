@@ -8,8 +8,8 @@
 #   |grad|    gradient norm of the group before clipping;
 #   wd        weight decay of the group in the optimizer.
 # Gates (exit 1 if any fails): all trainable parameters fp32; loss and gradients finite at every step; the
-# zero-initialised layers (Lin_m, and the P4 colour head) are nonzero after step 1 and larger at the end than
-# after step 1; the RGB L2 loss on the batch falls to <= 0.9 x its step-0 value.
+# zero-initialised tensors (Lin_m weights and biases, the P4 colour head's linear weight) are nonzero after
+# step 1 and larger at the end than after step 1; the RGB L2 loss on the batch falls to <= 0.9 x its step-0 value.
 #   python tools_s2/s2_dynamics_probe.py --config configs/S2P8_...yaml [--batch 4] [--steps 40]
 import argparse
 import importlib
@@ -102,7 +102,11 @@ def main():
         wds = sorted({wd_of[id(p)] for _, p in ps})
         print(f"[dyn] group {g:26s} tensors {len(ps):4d} params {sum(p.numel() for _, p in ps) / 1e6:8.2f}M "
               f"wd {wds}", flush=True)
-    zero_groups = [g for g in groups if "zero init" in g]
+    # the zero-initialised tensors themselves (a group such as the P4 colour head also holds a LayerNorm weight = 1)
+    zero_t = [(n, p) for n, p in named if float(p.detach().abs().max()) == 0.0]
+    print(f"[dyn] zero-initialised tensors: {[n for n, _ in zero_t]}", flush=True)
+    if not zero_t:
+        fails.append("no zero-initialised tensor found")
     norm_after = {}
     rows = []
     l2_0 = None
@@ -139,18 +143,18 @@ def main():
                 rows.append((step, g, num / cnt / lr, gnorm[g], wn))
             print(f"[dyn] step {step:3d} loss {float(loss):+.5f} l2 {l2:.6f} grad-norm {total:.3f} "
                   f"(clip {clip})", flush=True)
-        for g in zero_groups:
-            wn = float(torch.sqrt(sum((p.detach().float() ** 2).sum() for _, p in groups[g])))
-            norm_after.setdefault(g, {})[step] = wn
+        for n, p in zero_t:
+            norm_after.setdefault(n, {})[step] = float(p.detach().float().norm())
         del before
     print(f"[dyn] {'step':>4s} {'group':26s} {'step/lr':>9s} {'|grad|':>10s} {'|theta|':>10s}", flush=True)
     for step, g, r, gn, wn in rows:
         print(f"[dyn] {step:4d} {g:26s} {r:9.3f} {gn:10.3e} {wn:10.3e}", flush=True)
-    for g in zero_groups:
-        n1, nl = norm_after[g].get(1, 0.0), norm_after[g].get(max(norm_after[g]), 0.0)
-        print(f"[dyn] {g}: |theta| after step 1 {n1:.4e}, after step {max(norm_after[g])} {nl:.4e}", flush=True)
+    for n, _ in zero_t:
+        last = max(norm_after[n])
+        n1, nl = norm_after[n].get(1, 0.0), norm_after[n][last]
+        print(f"[dyn] zero-init {n}: |theta| after step 1 {n1:.4e}, after step {last} {nl:.4e}", flush=True)
         if not (n1 > 0 and nl > n1):
-            fails.append(f"{g} did not leave zero and grow")
+            fails.append(f"{n} did not leave zero and grow")
     l2_last = l2
     print(f"[dyn] RGB L2 on the fixed batch: step 0 {l2_0:.6f} -> step {args.steps} {l2_last:.6f} "
           f"(ratio {l2_last / l2_0:.3f}, gate <= 0.9)", flush=True)
