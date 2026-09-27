@@ -12,6 +12,8 @@
 #SBATCH --output=/home/z50057756/code/RnG_lagernvs_stage2/slurm_logs/%x-%j.out
 #SBATCH --error=/home/z50057756/code/RnG_lagernvs_stage2/slurm_logs/%x-%j.err
 # Stage-2 smoke (plan G7), 1 GPU: $1 config.
+#   leg 0  dynamics probe: one fixed batch, 40 AdamW steps (tools_s2/s2_dynamics_probe.py; its gates are recorded,
+#          the smoke continues so one run reports every leg)
 #   leg A  60 steps (batch 2, warmup 10, anneal 50->60, ckpt 30/60, validation posed+unposed on 4 objects)
 #   leg B  resume from 60 to 90 (require_resume_step 60; must resume, never restart)
 #   leg C  fail-closed: a truncated newest checkpoint must stop the run with a [resume] error
@@ -28,6 +30,10 @@ COMMON="exp_name=$EXP training.checkpoint_dir=$SD training.validation_out_dir=$S
  training.checkpoint_every=30 training.checkpoint_extra_steps=[] training.ckpt_keep_steps=[] training.val_every=30 \
  training.val_dataset_cfgs.split_file=data/gso_subset4.txt training.print_every=5 training.wandb_log_every=5 training.vis_every=1000"
 run() { python -m torch.distributed.run --standalone --nproc_per_node=1 train.py --config "$CONFIG" $COMMON "$@"; }
+GATE0=PASS
+echo "=== leg 0: dynamics probe ==="
+python tools_s2/s2_dynamics_probe.py --config "$CONFIG" --batch 4 --steps 40 || GATE0=FAIL
+echo "[s2-smoke] leg 0 (dynamics) $GATE0"
 echo "=== leg A: 60 steps ==="
 run training.train_steps=60 || { echo "[s2-smoke] GATE A FAIL"; exit 1; }
 ls -la "$SD" | grep ckpt_
@@ -53,4 +59,5 @@ assert all(v > 0 for v in norms.values()), "a zero-init output layer never moved
 assert not any(k.startswith("loss_computer.") for k in sd), "frozen VGG saved in the checkpoint"
 print("[s2-smoke] keys", len(sd), "params %.1fM" % (sum(v.numel() for v in sd.values()) / 1e6))
 PY
+[ "$GATE0" = PASS ] || { echo "[s2-smoke] GATE 0 FAIL (dynamics probe), legs A-D passed"; exit 1; }
 echo "[s2-smoke] ALL GATES PASS"

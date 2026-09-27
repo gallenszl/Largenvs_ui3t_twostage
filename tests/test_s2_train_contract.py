@@ -16,15 +16,23 @@ import torch.nn as nn
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
-from utils.training_utils import auto_resume_job, create_lr_scheduler, prune_checkpoints  # noqa: E402
+from utils.training_utils import auto_resume_job, create_lr_scheduler, prune_checkpoints, trainable_state_keys  # noqa: E402
 
 
 class Tiny(nn.Module):
     def __init__(self):
         super().__init__()
         self.a = nn.Linear(4, 4)
+        self.a.register_buffer("buf", torch.zeros(3))            # persistent buffer of a trainable module
         self.frozen = nn.Linear(4, 4)
+        self.frozen.register_buffer("fbuf", torch.ones(2))      # buffer of a frozen module
         self.frozen.requires_grad_(False)
+        self.alias = nn.ModuleList([self.frozen])               # same frozen module under a second name,
+                                                                # like the perceptual VGG (vgg.features.* / blocks.*)
+
+
+# what a trainable-only checkpoint of Tiny must carry, written out by hand (not derived from the code under test)
+TINY_KEEP = {"a.weight", "a.bias", "a.buf"}
 
 
 def make(model):
@@ -36,8 +44,7 @@ def make(model):
 def save(path, model, opt, sch, step, trainable_only=True):
     sd = model.state_dict()
     if trainable_only:
-        keep = {n for n, p in model.named_parameters() if p.requires_grad}
-        sd = {k: v for k, v in sd.items() if k in keep}
+        sd = {k: v for k, v in sd.items() if k in TINY_KEEP}
     torch.save({"model": sd, "optimizer": opt.state_dict(), "lr_scheduler": sch.state_dict(),
                 "fwdbwd_pass_step": step, "param_update_step": step}, path)
 
@@ -59,6 +66,11 @@ class TrainContractTests(unittest.TestCase):
             open(os.path.join(d, f"ckpt_{1000:016d}.pt"), "w").close()
             prune_checkpoints(d, 1, [], protect=os.path.join(d, f"ckpt_{1000:016d}.pt"))
             self.assertIn(f"ckpt_{1000:016d}.pt", os.listdir(d))
+
+    def test_trainable_state_keys_alias_and_buffers(self):
+        m = Tiny()
+        self.assertIn("alias.0.weight", m.state_dict())          # the alias really is in the state dict
+        self.assertEqual(trainable_state_keys(m), TINY_KEEP)
 
     def test_fail_closed_resume(self):
         torch.manual_seed(0)
@@ -92,6 +104,13 @@ class TrainContractTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 m4 = Tiny()
                 auto_resume_job(d, m4, *make(m4), False, fail_closed=True)
+            os.remove(os.path.join(d, f"ckpt_{50:016d}.pt"))
+            sd = torch.load(os.path.join(d, f"ckpt_{30:016d}.pt"))
+            del sd["model"]["a.buf"]
+            torch.save(sd, os.path.join(d, f"ckpt_{50:016d}.pt"))
+            with self.assertRaises(RuntimeError):
+                m4b = Tiny()
+                auto_resume_job(d, m4b, *make(m4b), False, fail_closed=True)
             os.remove(os.path.join(d, f"ckpt_{50:016d}.pt"))
             # optimizer state that does not fit must raise
             big = nn.Linear(8, 8)

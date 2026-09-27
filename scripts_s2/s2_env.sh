@@ -16,4 +16,4 @@ ulimit -c 0
 REPO=/home/z50057756/code/RnG_lagernvs_stage2
 cd "$REPO"
 echo "Job ${SLURM_JOB_ID:-?} | node $(hostname) | restart ${SLURM_RESTART_COUNT:-0} | qos ${SLURM_JOB_QOS:-?} | git $(git rev-parse --short HEAD)"
-nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null | head -2
+nvidia-smi --query-gpu=name,memory.total,uuid,pci.bus_id,ecc.errors.corrected.volatile.total,ecc.errors.uncorrected.volatile.total,retired_pages.pending --format=csv,noheader 2>/dev/null | head -4

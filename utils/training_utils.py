@@ -221,6 +221,25 @@ def prune_checkpoints(ckpt_dir, keep_latest, keep_steps=(), protect=None):
     return removed
 
 
+def trainable_state_keys(model):
+    """state_dict keys a trainable-only (stage-2) checkpoint carries: every name of a trainable parameter and
+    every persistent buffer that is not inside a module whose parameters are all frozen.  Names come from
+    named_parameters(remove_duplicate=False): a module registered twice (the perceptual VGG is reachable as
+    `vgg.features.*` and as `blocks.*`) appears under both names in state_dict, and the de-duplicated
+    named_parameters() would miss the second one."""
+    pnames = dict(model.named_parameters(remove_duplicate=False))
+    keep = {n for n, p in pnames.items() if p.requires_grad}
+    frozen_prefixes = []
+    for mn, mod in model.named_modules(remove_duplicate=False):
+        ps = list(mod.parameters())
+        if mn and ps and not any(p.requires_grad for p in ps):
+            frozen_prefixes.append(mn + ".")
+    for k in model.state_dict().keys():
+        if k not in pnames and not any(k.startswith(f) for f in frozen_prefixes):
+            keep.add(k)
+    return keep
+
+
 def auto_resume_job(
     load_path,
     model,
@@ -276,8 +295,8 @@ def auto_resume_job(
     status = _m.load_state_dict(checkpoint['model'], strict=False)
     print_rank0(f"Loaded model from {os.path.abspath(ckpt_path)}, the status is {status}")
     if fail_closed:
-        _frozen = {n for n, p in _m.named_parameters() if not p.requires_grad}
-        _bad_missing = [k for k in status.missing_keys if k not in _frozen]
+        _keep = trainable_state_keys(_m)
+        _bad_missing = [k for k in status.missing_keys if k in _keep]
         if _bad_missing or status.unexpected_keys:
             raise RuntimeError(f"[resume] {ckpt_path} does not match the model: missing trainable "
                                f"{_bad_missing[:8]} unexpected {list(status.unexpected_keys)[:8]}")

@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader, DistributedSampler, ConcatDataset
 import torch.distributed as dist
 from setup import init_config, init_distributed, init_wandb_and_backup
 from utils.metric_utils import visualize_intermediate_results
-from utils.training_utils import create_optimizer, create_lr_scheduler, auto_resume_job, print_rank0, build_clip_groups, clip_grad_norm_grouped, best_effort_write, prune_checkpoints
+from utils.training_utils import create_optimizer, create_lr_scheduler, auto_resume_job, print_rank0, build_clip_groups, clip_grad_norm_grouped, best_effort_write, prune_checkpoints, trainable_state_keys
 from utils.metric_utils import (
     export_results,
     summarize_evaluation,
@@ -631,7 +631,7 @@ class Trainer:
             model_weights = _mref.state_dict()
             if config.training.get("save_trainable_only", False):
                 # stage 2: the frozen stage 1 is not in the module tree; drop the frozen perceptual VGG too
-                _trainable = {n for n, p in _mref.named_parameters() if p.requires_grad}
+                _trainable = trainable_state_keys(_mref)
                 model_weights = {k: v for k, v in model_weights.items() if k in _trainable}
                 assert set(model_weights) == _trainable, "trainable parameters missing from the state dict"
             checkpoint = {

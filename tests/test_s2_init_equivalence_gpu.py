@@ -69,6 +69,11 @@ class InitEquivalenceTests(unittest.TestCase):
         cls.ref = ref.cuda().eval()
         cls.m8 = Stage2LagerNVS(cls.s2cfg).cuda().eval()
         cls.batch = val_batch(cls.s2cfg, 0)
+        # optional: keep references to the stage-2 renderer output for failure reports.  Off by default -- keeping
+        # them alive changes the allocation history, and the test must see the same memory behaviour as training
+        cls.s2out = {}
+        if os.environ.get("S2_TEST_KEEP_S2OUT") == "1":
+            cls.m8.renderer.register_forward_hook(lambda mod, inp, out: cls.s2out.update(out=out))
 
     def _pair(self, zero_p, training=False, seed=123):
         self.ref.val_cam_cond_zero_p = zero_p
@@ -80,6 +85,26 @@ class InitEquivalenceTests(unittest.TestCase):
             s = self.m8(self.batch, target_has_input=False, is_valid=not training)
         return r, s
 
+    def _report(self, s, r):
+        """why the P8 output differs from stage 1 (only built when an equality check fails)."""
+        d = (s.render.float() - r.render.float()).abs()
+        out = self.s2out.get("out", {})
+        res = {k: (bool(torch.isfinite(v).all()), float(v.float().abs().max())) for k, v in out.items()}
+        lin = [(float(l.weight.abs().max()), float(l.bias.abs().max())) for l in self.m8.renderer.out_lin]
+        ds1 = (s.render.float() - s.render_s1.float()).abs()
+        dp = (s.points.float() - r.points.float()).abs()
+        msg = (f"render max|diff| {float(d.max()):.3e} frac {float((d > 0).float().mean()):.3e} "
+               f"nan {int(torch.isnan(s.render).sum())} inf {int(torch.isinf(s.render).sum())} | vs own render_s1 "
+               f"max {float(ds1.max()):.3e} | points max|diff| {float(dp.max()):.3e} nan "
+               f"{int(torch.isnan(s.points).sum())} | s2 residual (finite, max) {res} | Lin_m (w, b) {lin}")
+        try:
+            am = s.target.alpha_mask.float()
+            fg = (am.view(am.shape[0], am.shape[1], 1, *d.shape[-2:]) > 0.5).expand_as(d)
+            msg += f" | differing px fg {int(((d > 0) & fg).sum())} bg {int(((d > 0) & ~fg).sum())}"
+        except Exception as e:                                                # noqa: BLE001
+            msg += f" | fg split n/a ({type(e).__name__})"
+        return msg
+
     def test_stage1_path_and_p8_init_equal_stage1(self):
         for zp in (0.0, 1.0):
             r, s = self._pair(zp)
@@ -87,7 +112,8 @@ class InitEquivalenceTests(unittest.TestCase):
             self.assertTrue(torch.equal(s.points_s1, r.points), f"zero_p {zp}: stage-1 points")
             for a, b in zip(s.camera, r.camera):
                 self.assertTrue(torch.equal(a, b), f"zero_p {zp}: camera")
-            self.assertTrue(torch.equal(s.render, r.render), f"zero_p {zp}: P8 init render != stage 1")
+            if not torch.equal(s.render, r.render):
+                self.fail(f"zero_p {zp}: P8 init render != stage 1: {self._report(s, r)}")
             self.assertTrue(torch.equal(s.points, r.points), f"zero_p {zp}: P8 init points != stage 1")
             print(f"[s2-gpu] zero_p {zp}: bitwise equal (render {tuple(s.render.shape)})", flush=True)
 
@@ -100,7 +126,8 @@ class InitEquivalenceTests(unittest.TestCase):
             self.ref.eval()
             self.m8.eval()
         self.assertTrue(torch.equal(s.render_s1, r.render))
-        self.assertTrue(torch.equal(s.render, r.render))
+        if not torch.equal(s.render, r.render):
+            self.fail(f"training draw: P8 init render != stage 1: {self._report(s, r)}")
 
     def test_pass2_depth_and_tables_are_sane(self):
         from model_s2 import geometry as geo

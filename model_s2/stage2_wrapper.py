@@ -156,7 +156,8 @@ class Stage2LagerNVS(nn.Module):
 
     # -------------------------------------------------------------------------------------------
     def trainable_state_keys(self):
-        return {n for n, p in self.named_parameters() if p.requires_grad}
+        from utils.training_utils import trainable_state_keys
+        return trainable_state_keys(self)
 
     def load_ckpt(self, load_path):
         """inference entry point: stage-2 weights only; stage 1 comes from model.stage2.stage1_ckpt."""
