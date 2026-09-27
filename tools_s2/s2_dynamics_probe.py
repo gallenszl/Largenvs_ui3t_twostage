@@ -8,8 +8,8 @@
 #   |grad|    gradient norm of the group before clipping;
 #   wd        weight decay of the group in the optimizer.
 # Gates (exit 1 if any fails): all trainable parameters fp32; loss and gradients finite at every step; the
-# zero-initialised tensors (Lin_m weights and biases, the P4 colour head's linear weight) are nonzero after
-# step 1 and larger at the end than after step 1; the RGB L2 loss on the batch falls to <= 0.9 x its step-0 value.
+# zero-initialised output layers (Lin_m, the P4 colour head's linear weight) are nonzero after step 1 and larger at
+# the end; every other zero-initialised tensor (inside the renderer: no gradient before Lin_m moves) is nonzero at the end; the RGB L2 loss on the batch falls to <= 0.9 x its step-0 value.
 #   python tools_s2/s2_dynamics_probe.py --config configs/S2P8_...yaml [--batch 4] [--steps 40]
 import argparse
 import importlib
@@ -149,12 +149,28 @@ def main():
     print(f"[dyn] {'step':>4s} {'group':26s} {'step/lr':>9s} {'|grad|':>10s} {'|theta|':>10s}", flush=True)
     for step, g, r, gn, wn in rows:
         print(f"[dyn] {step:4d} {g:26s} {r:9.3f} {gn:10.3e} {wn:10.3e}", flush=True)
+    # output layers get a gradient at step 1 and must move at once; every other zero-initialised tensor sits inside
+    # the renderer, which gets no gradient until Lin_m has left zero, so it only has to be nonzero by the end
+    def is_output_layer(n):
+        return n.startswith("renderer.out_lin") or n.startswith("color_head.linear")
+    inner = []
     for n, _ in zero_t:
         last = max(norm_after[n])
         n1, nl = norm_after[n].get(1, 0.0), norm_after[n][last]
-        print(f"[dyn] zero-init {n}: |theta| after step 1 {n1:.4e}, after step {last} {nl:.4e}", flush=True)
-        if not (n1 > 0 and nl > n1):
-            fails.append(f"{n} did not leave zero and grow")
+        if is_output_layer(n):
+            print(f"[dyn] zero-init output layer {n}: |theta| after step 1 {n1:.4e}, after step {last} {nl:.4e}",
+                  flush=True)
+            if not (n1 > 0 and nl > n1):
+                fails.append(f"output layer {n} did not leave zero at step 1 and grow")
+        else:
+            inner.append((n, n1, nl))
+    if inner:
+        still0 = [n for n, _, nl in inner if nl == 0]
+        print(f"[dyn] zero-init tensors inside the renderer: {len(inner)}; zero after step 1: "
+              f"{sum(n1 == 0 for _, n1, _ in inner)} (expected: no gradient reaches them at step 1); nonzero at the end: "
+              f"{len(inner) - len(still0)}; smallest final |theta| {min(nl for _, _, nl in inner):.2e}", flush=True)
+        if still0:
+            fails.append(f"{len(still0)} zero-initialised tensors never moved, e.g. {still0[:3]}")
     l2_last = l2
     print(f"[dyn] RGB L2 on the fixed batch: step 0 {l2_0:.6f} -> step {args.steps} {l2_last:.6f} "
           f"(ratio {l2_last / l2_0:.3f}, gate <= 0.9)", flush=True)
