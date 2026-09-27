@@ -10,6 +10,9 @@
 #SBATCH --time=2-00:00:00
 #SBATCH --requeue
 #SBATCH --open-mode=append
+#SBATCH --exclude=lrc-alpha-sg-gpu12
+# (temporary, 09-27: two unexplained init-test failures on gpu12 under investigation; lives here so relay
+#  successors inherit it)
 #SBATCH --output=/home/z50057756/code/RnG_lagernvs_stage2/slurm_logs/%x-%j.out
 #SBATCH --error=/home/z50057756/code/RnG_lagernvs_stage2/slurm_logs/%x-%j.err
 # Stage-2 training, 4 x H200, with a relay:  $1 config  $2 end step (26000)
