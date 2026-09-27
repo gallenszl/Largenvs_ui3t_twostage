@@ -137,4 +137,5 @@ dmypy.json
 RAE/
 RAE
 gso_render_rv
-slurm_logsmetric_checkpoint
+slurm_logs/
+metric_checkpoint
