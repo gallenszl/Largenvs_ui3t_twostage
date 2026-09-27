@@ -139,3 +139,6 @@ RAE
 gso_render_rv
 slurm_logs/
 metric_checkpoint
+
+# local Claude Code settings
+.claude/settings.local.json
