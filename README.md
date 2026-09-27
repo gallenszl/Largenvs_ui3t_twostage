@@ -416,7 +416,7 @@ python tools_s2/s2_train_check.py safety <ckpt 目录> 4000 <日志…> --world 
 - 输入相机再渲一遍:训练形状是 32 张图,229 ms(每张 6.4 ms,与目标图相同);推理 4 张 34 ms,其中 GPU 实算 14.3 ms。
 - 用 VGGT TrackHead 代替"再渲一遍 + 建表"(作业 137901,位置编码缓存后):推理 1 张 72 ms、10 张 116 ms;训练 48 张冻结 0.57 秒,联合训练约 2.2 秒/步。都比它要替换的部分(推理约 51 ms、训练约 0.26 秒)更贵,所以不划算。
 - bf16 权重(作业 137905,渲 1 张):输出与 fp32 权重逐位相同。只第一阶段 136.9→132.0 ms,加第二阶段 250.0→240.3 ms,几乎不提速。
-- CUDA Graph:VGGT 里有两处主机同步挡住录制——`vggt/models/aggregator.py` 在 CPU 上建全零张量再拷到 GPU,以及 `vggt/layers/rope.py` 读 `int(positions.max())`。`s2_graph_bench.py` 在进程内打了补丁,仓库文件没改;RoPE 补丁在 CPU 上逐位等价。1 张和 10 张的测量作业 137951 提交时还在原机器排队,结果见第 8.2 节。
+- CUDA Graph:VGGT 里有两处主机同步挡住录制——`vggt/models/aggregator.py` 在 CPU 上建全零张量再拷到 GPU,以及 `vggt/layers/rope.py` 读 `int(positions.max())`。`s2_graph_bench.py` 在进程内打了补丁,仓库文件没改;RoPE 补丁在 CPU 上逐位等价。1 张和 10 张的测量作业 137951 在原机器排队未能开跑,09-27 已取消,要在新机器上重跑(第 8.2 节)。
 
 ### 7.5 第一阶段的点能不能当几何对应(候选预检,作业 137766)
 
@@ -449,7 +449,7 @@ python tools_s2/s2_train_check.py safety <ckpt 目录> 4000 <日志…> --world 
 
 ### 8.2 bf16 + CUDA Graph(渲 1 张、10 张)
 
-- 作业 137951 在原机器上。如果没跑完,在新机器上执行:
+- 原机器上的作业 137951 没开跑就取消了(09-27),在新机器上执行:
 
 ```bash
 sbatch scripts_s2/s2_graph_bench.sbatch <任一第二阶段 ckpt> <输出前缀>
