@@ -15,7 +15,7 @@ model:
     vis_rel_tau: 0.03
     scene_block: 3
     target_block_px: 32
-    attn_backend: sdpa
+    attn_backend: flex
     pad_bucket: 256
   # UNI3T: three tasks at once. enabled=false reproduces the dense NVS-only arm
   # PLN2pose_all287k_b32t6_fp32lr35_const bit-for-bit.
