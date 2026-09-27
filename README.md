@@ -84,6 +84,11 @@
 | omegaconf / easydict / einops / PyYAML | 2.1.1 / 1.13 / 0.8.2 / 6.0.3 |
 | scipy / scikit-image / wandb | 1.15.3 / 0.23.2 / 0.18.7 |
 
+- **装环境**:仓库里已有安装材料,新机器上若已有同版环境就不用装。
+  - `requirements-fa3.txt`:主依赖,已锁版本,含 cu128 的 index。
+  - `requirements-fa3-current-lock.txt`:整个环境的完整锁定清单。
+  - `scripts/install_rng_fa3_env_example.sh`:在另一台机器上从零装出同版环境;FA3 从 Dao-AILab/flash-attention 的 `hopper/` 目录按 commit `2e53092aa70fccd3f04013a01a52dc20c619e62b` 编译。
+  - `scripts/setup_rng_fa3_env.sh`:同一流程写死了 `/scratch/zs3325` 路径的版本。
 - **硬件**:只在 H200(sm_90)上测过。训练 4 卡,测试、冒烟、测速 1 卡。FA3 只能在 Hopper 上跑。
 - **备用环境** `rng-v3moe-t211-te218`(torch 2.11)没用上,不需要。
 - `scripts_s2/s2_env.sh` 设置的环境变量:
