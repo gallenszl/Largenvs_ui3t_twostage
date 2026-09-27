@@ -17,6 +17,10 @@ class GSODataset_ours(ObjaverseDataset):
     def __init__(self, config):
         super().__init__(config)
         self.config = config
+        # stage 2: validation may pin its own roll (0 = deterministic); default inherits training's value
+        _val_roll = self.config.training.val_dataset_cfgs.get("roll_augment_max_deg", None)
+        if _val_roll is not None:
+            self.roll_augment_max_deg = float(_val_roll)
         self.root_path = self.config.training.val_dataset_cfgs.root_dir
         # GSO validation stays on loose files regardless of training's use_tar setting.
         self.use_tar = False

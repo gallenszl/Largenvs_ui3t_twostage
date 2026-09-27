@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader, DistributedSampler, ConcatDataset
 import torch.distributed as dist
 from setup import init_config, init_distributed, init_wandb_and_backup
 from utils.metric_utils import visualize_intermediate_results
-from utils.training_utils import create_optimizer, create_lr_scheduler, auto_resume_job, print_rank0, build_clip_groups, clip_grad_norm_grouped, best_effort_write
+from utils.training_utils import create_optimizer, create_lr_scheduler, auto_resume_job, print_rank0, build_clip_groups, clip_grad_norm_grouped, best_effort_write, prune_checkpoints
 from utils.metric_utils import (
     export_results,
     summarize_evaluation,
@@ -177,7 +177,8 @@ class Trainer:
             optimizer,
             lr_scheduler,
             reset_training_state,
-            override_lr=_ovr_lr
+            override_lr=_ovr_lr,
+            fail_closed=bool(config.training.get("resume_fail_closed", False)),
         )
         # auto_resume_job returns step 0 (fresh optimizer) when no ckpt loads or the
         # optimizer state fails to load; a branch that must continue a trunk opts in
@@ -315,6 +316,11 @@ class Trainer:
 
         self.start_train_step = self.cur_train_step
         self.model.train()
+        # stage 2: validation modes = list of (tag, val_cam_cond_zero_p); default = the historical single pass
+        self.val_modes = [tuple(m) for m in (config.training.get("val_modes", None) or [])] or [(None, None)]
+        if config.training.get("val_at_start", False) and self.cur_train_step == 0:
+            for _mode, _zp in self.val_modes:
+                self.validate(_mode, _zp)
 
         while self.cur_train_step <= self.total_train_steps:
             # 检查是否需要解冻 RAE decoder
@@ -478,18 +484,25 @@ class Trainer:
             # default = checkpoint_every keeps the historical coupled behavior
             val_every = config.training.get("val_every", config.training.checkpoint_every)
             if (self.cur_train_step % val_every == 0) or (self.cur_train_step == self.total_train_steps):
-                self.validate()
+                for _mode, _zp in self.val_modes:
+                    self.validate(_mode, _zp)
 
             if export_inter_results:
                 torch.cuda.empty_cache()
                 dist.barrier()
 
     @torch.inference_mode()
-    def validate(self):
+    def validate(self, mode=None, zero_p=None):
         config = self.config
         ddp_info = config.ddp_info
         self.model.eval()
-        out_dir = os.path.join(config.training.validation_out_dir, f"eval_iter_{self.cur_train_step:08d}")
+        _mod = self.model.module if isinstance(self.model, DDP) else self.model
+        if zero_p is not None:
+            # stage 2: posed (0.0) / unposed (1.0) validation passes
+            _mod.val_cam_cond_zero_p = float(zero_p)
+        _suffix = f"_{mode}" if mode else ""
+        _prefix = f"val/{mode}_" if mode else "val/"
+        out_dir = os.path.join(config.training.validation_out_dir, f"eval_iter_{self.cur_train_step:08d}{_suffix}")
 
         n_export_failed = 0
         for batch in tqdm(self.val_dataloader, disable = not ddp_info.is_main_process):
@@ -535,7 +548,7 @@ class Trainer:
                 print(f"{k}: {v}")
 
             # log to wandb
-            val_log_dict = {"val/" + k: float(v) for k, v in avg_metric_dict.items()}
+            val_log_dict = {_prefix + k: float(v) for k, v in avg_metric_dict.items()}
             # UNI3T: exactly two extra curves from the depth / pose tasks. Everything
             # else those summaries produce stays in the json / csv / txt files. Both
             # helpers return strings and return None when no shard wrote metrics.
@@ -555,9 +568,9 @@ class Trainer:
                 builtins.print(f"[val] pose summary failed at step {self.cur_train_step}: {_e}")
                 _pose = None
             if _depth and "abs_rel" in _depth:
-                val_log_dict["val/abs_rel"] = float(_depth["abs_rel"])
+                val_log_dict[_prefix + "abs_rel"] = float(_depth["abs_rel"])
             if _pose and "Auc_30" in _pose:
-                val_log_dict["val/auc30"] = float(_pose["Auc_30"])
+                val_log_dict[_prefix + "auc30"] = float(_pose["Auc_30"])
             val_log_dict["forward_pass_step"] = self.cur_train_step
             wandb.log(val_log_dict)
 
@@ -611,11 +624,16 @@ class Trainer:
             wandb.log(log_dict)
 
         # save checkpoint
-        if (self.cur_train_step % config.training.checkpoint_every == 0) or (self.cur_train_step == self.total_train_steps):
-            if isinstance(self.model, DDP):
-                model_weights = self.model.module.state_dict()
-            else:
-                model_weights = self.model.state_dict()
+        _extra_steps = {int(x) for x in (config.training.get("checkpoint_extra_steps", None) or [])}
+        if (self.cur_train_step % config.training.checkpoint_every == 0) or (self.cur_train_step == self.total_train_steps) \
+                or (self.cur_train_step in _extra_steps):
+            _mref = self.model.module if isinstance(self.model, DDP) else self.model
+            model_weights = _mref.state_dict()
+            if config.training.get("save_trainable_only", False):
+                # stage 2: the frozen stage 1 is not in the module tree; drop the frozen perceptual VGG too
+                _trainable = {n for n, p in _mref.named_parameters() if p.requires_grad}
+                model_weights = {k: v for k, v in model_weights.items() if k in _trainable}
+                assert set(model_weights) == _trainable, "trainable parameters missing from the state dict"
             checkpoint = {
                 "model": model_weights,
                 "optimizer": self.optimizer.state_dict(),
@@ -654,6 +672,13 @@ class Trainer:
                         pass
             if _saved:
                 print(f"Saved checkpoint at step {self.cur_train_step} to {os.path.abspath(ckpt_path)}")
+                _keep_latest = config.training.get("ckpt_keep_latest", None)
+                if _keep_latest:
+                    try:
+                        prune_checkpoints(config.training.checkpoint_dir, int(_keep_latest),
+                                          config.training.get("ckpt_keep_steps", None) or [], protect=ckpt_path)
+                    except OSError as _e:
+                        builtins.print(f"[ckpt] WARNING: pruning failed at step {self.cur_train_step}: {_e}")
             else:
                 builtins.print(f"[ckpt] WARNING: gave up on checkpoint at step {self.cur_train_step} "
                       f"after 3 attempts; training continues without it")

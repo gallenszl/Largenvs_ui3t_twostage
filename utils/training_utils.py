@@ -199,13 +199,36 @@ def find_checkpoints(load_path):
 
 
 
+def prune_checkpoints(ckpt_dir, keep_latest, keep_steps=(), protect=None):
+    """Delete ckpt_<16 digits>.pt files except the newest keep_latest, the steps in keep_steps and protect.
+
+    Only exact trainer checkpoint names are touched (no .tmp, no other files); every removal is logged.
+    Returns the removed file names.
+    """
+    import re
+    pat = re.compile(r"^ckpt_(\d{16})\.pt$")
+    items = sorted((int(m.group(1)), f) for f in os.listdir(ckpt_dir) for m in [pat.match(f)] if m)
+    keep = {st for st, _ in items[-int(keep_latest):]} if int(keep_latest) > 0 else set()
+    keep |= {int(x) for x in (keep_steps or [])}
+    removed = []
+    for st, f in items:
+        path = os.path.join(ckpt_dir, f)
+        if st in keep or (protect is not None and os.path.abspath(path) == os.path.abspath(protect)):
+            continue
+        os.remove(path)
+        removed.append(f)
+        builtins.print(f"[ckpt] pruned {path}", flush=True)
+    return removed
+
+
 def auto_resume_job(
     load_path,
     model,
     optimizer,
     lr_scheduler,
     reset_training_state,
-    override_lr=None
+    override_lr=None,
+    fail_closed=False,
 ):
     """
     Resume training from the latest checkpoint in the specified directory.
@@ -222,6 +245,9 @@ def auto_resume_job(
     Returns:
         optimizer, lr_scheduler, forward_pass_step, param_update_step
 
+    fail_closed (stage 2): once a checkpoint exists, never fall back silently -- the newest checkpoint must
+    load, its model keys must match (missing only frozen parameters, nothing unexpected), and the optimizer
+    and lr_scheduler must restore; otherwise raise.
     """
     forward_pass_step = 0
     param_update_step = 0
@@ -236,7 +262,9 @@ def auto_resume_job(
         try:
             checkpoint = torch.load(ckpt_path, map_location="cpu")
             break
-        except:
+        except Exception as _e:
+            if fail_closed:
+                raise RuntimeError(f"[resume] newest checkpoint {ckpt_path} does not load: {_e}") from _e
             traceback.print_exc()
             print_rank0(f"Failed to load {ckpt_path}, trying next-older checkpoint")
     if checkpoint is None:
@@ -244,16 +272,28 @@ def auto_resume_job(
         return optimizer, lr_scheduler, forward_pass_step, param_update_step
 
     # Load model weights
-    if isinstance(model, DDP):
-        status = model.module.load_state_dict(checkpoint['model'], strict=False)
-    else:
-        status = model.load_state_dict(checkpoint['model'], strict=False)
+    _m = model.module if isinstance(model, DDP) else model
+    status = _m.load_state_dict(checkpoint['model'], strict=False)
     print_rank0(f"Loaded model from {os.path.abspath(ckpt_path)}, the status is {status}")
+    if fail_closed:
+        _frozen = {n for n, p in _m.named_parameters() if not p.requires_grad}
+        _bad_missing = [k for k in status.missing_keys if k not in _frozen]
+        if _bad_missing or status.unexpected_keys:
+            raise RuntimeError(f"[resume] {ckpt_path} does not match the model: missing trainable "
+                               f"{_bad_missing[:8]} unexpected {list(status.unexpected_keys)[:8]}")
 
     # resume training state
     if not reset_training_state:
         try:
             optimizer.load_state_dict(checkpoint["optimizer"])
+            if fail_closed:
+                # torch only checks group / parameter counts; a state from another model loads silently
+                for _g in optimizer.param_groups:
+                    for _p in _g["params"]:
+                        for _k, _v in optimizer.state.get(_p, {}).items():
+                            if torch.is_tensor(_v) and _v.dim() > 0 and _v.shape != _p.shape:
+                                raise ValueError(f"optimizer state '{_k}' has shape {tuple(_v.shape)} "
+                                                 f"for a parameter of shape {tuple(_p.shape)}")
             lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
             forward_pass_step = checkpoint["fwdbwd_pass_step"]
             param_update_step = checkpoint["param_update_step"]
@@ -266,7 +306,9 @@ def auto_resume_job(
                     g["initial_lr"] = override_lr
                 lr_scheduler.base_lrs = [override_lr] * len(lr_scheduler.base_lrs)
                 print_rank0(f"Overrode resumed peak lr/base_lrs to {override_lr}")
-        except:
+        except Exception as _e:
+            if fail_closed:
+                raise RuntimeError(f"[resume] optimizer/lr_scheduler state of {ckpt_path} does not restore: {_e}") from _e
             traceback.print_exc()
             print_rank0(f"Failed to load optimizer and lr_scheduler from {ckpt_path}")
     
