@@ -32,10 +32,12 @@ class Stage1Runner:
         if expect_step is not None and int(step) != int(expect_step):
             raise RuntimeError(f"[stage1] {ckpt_path} is step {step}, expected {expect_step}")
         missing, unexpected = model.load_state_dict(ck["model"], strict=False)
+        # the stage-1 checkpoint also carries its frozen perceptual-loss VGG; the loss module is dropped here
         bad = [k for k in missing if not k.startswith("loss_computer.")]
-        if bad or unexpected:
+        bad_u = [k for k in unexpected if not k.startswith("loss_computer.")]
+        if bad or bad_u:
             raise RuntimeError(f"[stage1] checkpoint does not match the model: missing {bad[:8]} "
-                               f"unexpected {list(unexpected)[:8]}")
+                               f"unexpected {bad_u[:8]}")
         del ck
         model.requires_grad_(False)
         model.eval()

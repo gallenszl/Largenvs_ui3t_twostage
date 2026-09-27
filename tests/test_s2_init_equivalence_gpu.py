@@ -65,7 +65,7 @@ class InitEquivalenceTests(unittest.TestCase):
         ref = LagerNVSInRnG(cls.s1cfg)
         sd = torch.load(ck, map_location="cpu", weights_only=True, mmap=True)["model"]
         missing, unexpected = ref.load_state_dict(sd, strict=False)
-        assert not unexpected and all(k.startswith("loss_computer.") for k in missing)
+        assert all(k.startswith("loss_computer.") for k in list(missing) + list(unexpected)), (missing, unexpected)
         cls.ref = ref.cuda().eval()
         cls.m8 = Stage2LagerNVS(cls.s2cfg).cuda().eval()
         cls.batch = val_batch(cls.s2cfg, 0)

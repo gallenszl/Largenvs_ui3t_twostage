@@ -269,7 +269,8 @@ def build_forward_table(P_t, alpha_t, layout, c2w_in, K_in, P_in, alpha_in, patc
     flat = ((bv * Lq + N_REG + slot) * Vi + k) * nv + sv * scene_g + su
     dump = BV * Lq * Vi * nv
     M0 = torch.zeros(dump + 1, dtype=torch.bool, device=dev)
-    M0[torch.where(vis, flat, torch.full_like(flat, dump))] = True
+    # index_fill_ takes the fill value as a kernel scalar (no host->device copy, no sync)
+    M0.index_fill_(0, torch.where(vis, flat, torch.full_like(flat, dump)).reshape(-1), True)
     M0 = M0[:dump].view(BV, Lq, Vi, scene_g, scene_g)
     M0 = dilate_bool(M0, radius).view(BV, Lq, S)
 
@@ -327,7 +328,7 @@ def build_reverse_table(P_in, alpha_in, layout, c2w_t, K_t, P_t, alpha_t, patch,
     flat = (bv * S + s) * (g * g) + tt
     dump = BV * S * g * g
     R0 = torch.zeros(dump + 1, dtype=torch.bool, device=dev)
-    R0[torch.where(covis, flat, torch.full_like(flat, dump))] = True
+    R0.index_fill_(0, torch.where(covis, flat, torch.full_like(flat, dump)).reshape(-1), True)
     R0 = R0[:dump].view(BV, S, g, g)
     R0 = dilate_bool(R0, radius).view(BV, S, g * g)
 
