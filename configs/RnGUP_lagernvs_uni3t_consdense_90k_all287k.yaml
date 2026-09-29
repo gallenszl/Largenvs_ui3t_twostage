@@ -39,7 +39,7 @@ training:
   ckpt_keep_steps: [30000, 60000, 90000]
   amp_dtype: bf16
   use_bf16: false
-  api_key_path: ./configs/api_keys.yaml
+  api_key_path: /home/z50057756/code/RnG_lagernvs/configs/api_keys.yaml   # read-only reference (never copied)
   batch_size_per_gpu: 8
   beta1: 0.9
   beta2: 0.95
