@@ -23,6 +23,7 @@
 9. 之前定下、后续要做的消融 / 备选 / 暂缓
 10. 已知问题与注意事项
 11. 用到的 checkpoints 一览
+12. 第一阶段加轨迹一致性损失(2026-09-29 起)
 
 ---
 
@@ -522,8 +523,40 @@ sbatch scripts_s2/s2_graph_bench.sbatch <任一第二阶段 ckpt> <输出前缀>
 | 冻结的第一阶段 | `PLN2uni3t_all287k_b32t6_fp32lr35_wsd60k_a10k` ckpt_70000 | HF `szlgallen/RAE_backup_checkpoints`(第 3.1 节);原机器旧盘 | **需要**,从 HF 下载 |
 | VGGT-1B 预训练 | `facebook/VGGT-1B` 的 `model.pt` | `$TORCH_HOME/hub/checkpoints/` | 需要(新机器已有) |
 | 感知损失、LPIPS | `imagenet-vgg-verydeep-19.mat`、`vgg16-397923af.pth`、`vgg19-dcbb9e9d.pth` | `metric_checkpoint/`、`$TORCH_HOME/hub/checkpoints/` | 需要(新机器已有) |
-| 第一阶段的退火起点 | `PLN2uni3t_all287k_b32t6_fp32lr35_const` ckpt_60000 | 原机器 | 不需要 |
+| 第一阶段的退火起点;第 12 节冒烟臂的续训起点 | `PLN2uni3t_all287k_b32t6_fp32lr35_const` ckpt_60000 | HF 同仓 `moe_experiments/checkpoints/PLN2uni3t_all287k_b32t6_fp32lr35_const/ckpt_0000000000060000.pt`(16,755,969,541 字节,sha256 `d8a8a45d4998c6e05b4e769ad19d89eeeb8da267594e9cba0fe2638e30ad101b`) | **第 12 节的冒烟臂需要** |
 | "第一阶段多训"对照的起点(暂缓) | `PLN2uni3t_all287k_b32t6_fp32lr35_const` ckpt_76000 | 只在原机器 | 做这个对照时才需要 |
 | 第一阶段恒定学习率主干的中间点 | 同上 ckpt 16k / 26k / 36k / 46k / 56k | HF 同仓 `moe_experiments/checkpoints/PLN2uni3t_all287k_b32t6_fp32lr35_const/` | 不需要 |
 | 第二阶段冒烟 ckpt(只存可训练参数,各约 3 GB) | `S2P8_…_SMOKE_1378xx`、`S2P4_…_SMOKE_1378xx` 的 ckpt_60 / ckpt_90 | 原机器旧盘 `…/moe_experiments/SMOKE/` | 不需要。新机器冒烟会自己生成;8.2 节的测速可以直接用新冒烟的 ckpt |
 | 第二阶段正式训练 | 没有 | 块 8 训练 137864 从未开跑 | — |
+
+---
+
+## 12. 第一阶段加轨迹一致性损失(2026-09-29 起)
+
+**做什么。** 给第一阶段(uni3t)训练加一个损失:同一个 3D 点在两张目标图上,模型预测点之差要等于真值点之差。写成两端预测误差之差 |e_a − e_b| 的 L1。做法照 VGGT-Ω 开源代码的 `consistency.py`,只在 6 张目标图之间做(输入图没有预测点图)。轨迹全部由真值几何生成,每步在 GPU 上重建。目的是让第一阶段的点图跨视角更一致,第二阶段用它投影选窗口时误差更小。
+
+**代码。**
+- `model/track_consistency.py`:建轨迹 + 损失,旋钮全可配(`tau`、`abs_tol`、`neighbours`、`border`、`num_tracks`、`sampling`、`query_views`、`min_valid`)。
+- `model/loss.py`:`training.weight_consistency > 0` 才启用,缺省 0,已有配置逐位不变;`training.consistency` 传旋钮。
+- `tests/test_track_consistency.py`:8 项(球体场景对 numpy 参照逐格相等;与 `model_s2/geometry.py` 的像素选择一致)。
+- `tools/track_consistency_probe.py`:真值统计探针(定阈值用),`scripts_s2/track_probe_cpu.sbatch`。
+- `tools/uni3t_task_grad_decomp.py`:配置里 `weight_consistency > 0` 时自动多测一个 `consistency` 任务的梯度占比(定权重用)。
+
+**定下的设置**(依据是 128 个真实训练物体上的探针,见 `docs/probe_results/` 与对话记录):容差 1%、最近 4 个像素中心、边界 4、有效对为 0 记 0、inf/NaN 走 `check_and_fix_inf_nan`;主臂每张查询图 512 条(Ω 采样),消融臂全算;权重起 0.2,开训前用梯度探针核。
+
+**三个配置**(都以 `configs/RnGUP_lagernvs_uni3t_b32t6_fp32lr35_const_90k_all287k.yaml` 为底,diff 只有 `exp_name` 和 `training:` 下新增的键):
+
+| 配置 | exp_name | 用途 |
+|---|---|---|
+| `configs/RnGUP_lagernvs_uni3t_cons512_from60k_66k_all287k.yaml` | `PLN2uni3t_cons512_from60k_all287k_b32t6_fp32lr35_const` | 冒烟 / 参考:从 const 臂 ckpt_60000 续训到 66k |
+| `configs/RnGUP_lagernvs_uni3t_cons512_90k_all287k.yaml` | `PLN2uni3t_cons512_all287k_b32t6_fp32lr35_const` | 主臂,从零 90k |
+| `configs/RnGUP_lagernvs_uni3t_consdense_90k_all287k.yaml` | `PLN2uni3t_consdense_all287k_b32t6_fp32lr35_const` | 消融:全算 |
+
+**怎么跑。**
+1. 先跑梯度探针定权重(1 卡):`python tools/uni3t_task_grad_decomp.py configs/RnGUP_lagernvs_uni3t_cons512_90k_all287k.yaml 12 <const ckpt_60000>`。规则:一致性项在渲染器目标流各块的梯度能量占点图任务的 20–100%,不在就按比例改 `weight_consistency`。
+2. 冒烟臂:把 const 臂的 `ckpt_0000000000060000.pt` 复制或硬链接进该配置的 `checkpoint_dir`,再 `CONFIG=configs/RnGUP_lagernvs_uni3t_cons512_from60k_66k_all287k.yaml NPROC=4 sbatch scripts/pln2_train_8h200.sbatch`(4 卡,6k 步约 6.8 小时)。过关:无 NaN 跳步、`loss_consistency` 下降、62k/64k/66k 的 subset64 LPIPS 与 const 臂同步数差 < 0.003。
+3. 主臂与消融臂:同一启动器换配置,各 90k(约 4.2 天,4 卡,守护用 `scripts/pln2_uni3t_watchdog.sh` 同款)。训练内评测设置与 const 臂完全一致,同步数可直接配对。
+
+**判读(事先定)。** 主判:`tools_s2/s2_candidate_probe.py` 在 subset64 上的有位姿投影误差(均值、中位)与 37 格半径 1 命中率,新臂 vs `PLN2uni3t_all287k_b32t6_fp32lr35_const` 同步数;改善要超出 const 臂自身 66k / 72k / 76k 三点的起伏(噪声带,JSON 在 `docs/probe_results/`)。辅判:subset64 LPIPS 同步数差,0.003 为信号线;abs_rel 照报。
+
+**注意。** 这套实验用的是未修半像素的加载器,与 const 臂同口径;加载器修好后基准要重跑。
