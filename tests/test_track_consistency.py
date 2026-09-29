@@ -228,6 +228,31 @@ class TrackTests(unittest.TestCase):
                                      num_tracks=k, generator=g)
         self.assertLess(int(sub["consistency_valid"]), int(dense["consistency_valid"]))
 
+    def test_agrees_with_stage2_geometry(self):
+        """Same pixel choice as model_s2/geometry.py (stage-2 tables) on GT: index-unit round == continuous floor;
+        the visibility masks differ only where the two tolerance formulas differ (|z - D| between tau*z and tau*D)."""
+        from model_s2 import geometry as g2
+        V = self.pts_gt.shape[1]
+        HW = H * W
+        X = self.pts_gt.permute(0, 1, 3, 4, 2).reshape(1, V, 1, HW, 3)
+        u, v, z = g2.project(X, self.c2w_t[:, None], self.K_t[:, None])           # [1, Va, Vb, HW]
+        ins = g2.inside_image(u, v, z, H, W)
+        vi, ui = g2.nearest_pixel(u, v, H, W)
+        pix = vi * W + ui
+        idx, valid = build_tracks(self.pts_gt, self.depth_t, self.c2w_t, self.K_t, tau=TAU, neighbours="exact", border=0)
+        idx, valid = idx.reshape(1, V, V, HW), valid.reshape(1, V, V, HW)
+        fgq = (self.depth_t > 0).reshape(1, V, 1, HW)
+        D = self.depth_t.reshape(1, V, HW)[torch.arange(1)[:, None, None, None], torch.arange(V)[None, None, :, None], pix]
+        eye = torch.eye(V, dtype=torch.bool)[None, :, :, None]
+        care = ins & fgq & (D > 0) & ~eye          # build_tracks only records a pixel where b's depth is foreground
+        self.assertGreater(int(care.sum()), 1000)
+        self.assertEqual(int(((idx != pix) & care).sum()), 0)                      # identical pixel choice
+        vis2 = care & ((z - D).abs() <= TAU * D)                                    # stage-2 formula (tables use tau 0.03)
+        gap = (z - D).abs()
+        band = (gap >= TAU * z) & (gap <= TAU * D)                                  # where the two formulas may differ
+        self.assertEqual(int(((vis2 ^ valid) & ~band).sum()), 0)
+        self.assertGreater(int((vis2 & valid).sum()), 0.99 * int(vis2.sum()))
+
     def test_min_valid_and_nan_guard(self):
         pred = self.pts_gt.clone()
         pred[0, 0, 0, 5, 5] = float("inf")
