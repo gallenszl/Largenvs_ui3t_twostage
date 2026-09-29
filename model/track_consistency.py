@@ -26,7 +26,7 @@ NEIGHBOURS = {
 }
 
 
-def build_tracks(pts_gt, depth, c2w, K, tau=0.01, abs_tol=0.0, neighbours="omega4", border=1, query_views="all"):
+def build_tracks(pts_gt, depth, c2w, K, tau=0.01, abs_tol=0.0, neighbours="centre4", border=4, query_views="all"):
     """GT-only correspondences between every ordered pair of views.
 
     pts_gt [B, V, 3, H, W] world points (0 on background), depth [B, V, H, W] z-depth (0 = background),
@@ -116,7 +116,7 @@ def sample_tracks(valid, fg, num_tracks, scheme="omega", generator=None):
     return valid & sel.reshape(B, Va, 1, H, W)
 
 
-def track_consistency_loss(pts_est, pts_gt, depth, c2w, K, tau=0.01, abs_tol=0.0, neighbours="omega4", border=1,
+def track_consistency_loss(pts_est, pts_gt, depth, c2w, K, tau=0.01, abs_tol=0.0, neighbours="centre4", border=4,
                            num_tracks=None, sampling="omega", query_views="all", min_valid=1, hard_max=100.0,
                            generator=None):
     """pts_est / pts_gt [B, V, 3, H, W] (target views), depth [B, V, H, W], c2w [B, V, 4, 4], K [B, V, 4].

@@ -39,7 +39,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from model.lagernvs_wrapper import LagerNVSInRnG  # noqa: E402
 
-TASKS = ("rgb", "point", "camera")
+TASKS = ("rgb", "point", "camera")          # + "consistency" when training.weight_consistency > 0 (set in main)
 PAIRS = (("rgb", "point"), ("rgb", "camera"), ("point", "camera"))
 REC_SUBS = ("cross_attn_rec", "mlp_rec", "norm1_rec", "norm2_rec")
 BLK = "model.renderer.renderer_core.renderer_blocks."
@@ -83,12 +83,25 @@ def task_parts(cfg, lm):
            + tr.perceptual_loss_weight * lm.perceptual_loss)
     cam = tr.weight_camera * lm.loss_camera
     tot = lm.loss
-    return {"rgb": rgb, "camera": cam, "point": tot - rgb - cam, "total": tot}
+    parts = {"rgb": rgb, "camera": cam, "total": tot}
+    if "consistency" in TASKS:
+        # track-consistency term (model/track_consistency.py); point = the rest, as before
+        parts["consistency"] = float(tr.get("weight_consistency", 0.0) or 0.0) * lm["loss_consistency"]
+        parts["point"] = tot - rgb - cam - parts["consistency"]
+    else:
+        parts["point"] = tot - rgb - cam
+    return parts
 
 
 def main():
+    global TASKS, PAIRS
     cfg_path, n_batches, ckpts = sys.argv[1], int(sys.argv[2]), sys.argv[3:]
     cfg = edict(OmegaConf.to_container(OmegaConf.load(cfg_path), resolve=True))
+    if float(cfg.training.get("weight_consistency", 0.0) or 0.0) > 0.0:
+        TASKS = TASKS + ("consistency",)
+        PAIRS = PAIRS + (("rgb", "consistency"), ("point", "consistency"))
+        print(f"[td] track-consistency task on: weight_consistency={cfg.training.weight_consistency} "
+              f"consistency={dict(cfg.training.get('consistency', {}) or {})}", flush=True)
     cfg.ddp_info = edict(global_rank=0, world_size=1, local_rank=0, device="cuda:0",
                          is_main_process=True, seed=int(cfg.training.get("seed", 777)))
     dev = "cuda"
@@ -148,7 +161,8 @@ def main():
                 if task == "rgb":
                     lm = out.loss_metrics
                     comps = {k: float(lm[k]) for k in ("l2_loss", "perceptual_loss", "loss_camera",
-                                                       "loss_conf_point", "loss_reg_point", "loss_grad_point")}
+                                                       "loss_conf_point", "loss_reg_point", "loss_grad_point",
+                                                       "loss_consistency", "consistency_valid") if k in lm}
                     comps.update({f"part_{k}": float(v) for k, v in parts.items()})
                 parts[task].backward()
                 grads[task] = [p.grad.detach().float().clone() if p.grad is not None else None
@@ -164,25 +178,21 @@ def main():
                        "dom": 0, "prevdot": {t: 0.0 for t in TASKS}, "resid": 0.0, "totsq": 0.0}
                    for g in gnames}
             for j, gs in enumerate(gmap):
-                gr, gp, gc = grads["rgb"][j], grads["point"][j], grads["camera"][j]
-                z = next((x for x in (gr, gp, gc) if x is not None), None)
+                gtask = {t: grads[t][j] for t in TASKS}
+                z = next((x for x in gtask.values() if x is not None), None)
                 if z is None:            # no task reaches this tensor in this batch
                     continue
-                gr = gr if gr is not None else torch.zeros_like(z)
-                gp = gp if gp is not None else torch.zeros_like(z)
-                gc = gc if gc is not None else torch.zeros_like(z)
-                vals = {"sq": {"rgb": gr.pow(2).sum().item(), "point": gp.pow(2).sum().item(),
-                               "camera": gc.pow(2).sum().item()},
-                        "dot": {"rgb|point": (gr * gp).sum().item(), "rgb|camera": (gr * gc).sum().item(),
-                                "point|camera": (gp * gc).sum().item()},
-                        "dom": (gp.abs() > gr.abs()).sum().item()}
+                gtask = {t: (x if x is not None else torch.zeros_like(z)) for t, x in gtask.items()}
+                vals = {"sq": {t: gtask[t].pow(2).sum().item() for t in TASKS},
+                        "dot": {f"{a}|{c}": (gtask[a] * gtask[c]).sum().item() for a, c in PAIRS},
+                        "dom": (gtask["point"].abs() > gtask["rgb"].abs()).sum().item()}
                 if "total" in grads:
                     gt = grads["total"][j] if grads["total"][j] is not None else torch.zeros_like(z)
-                    vals["resid"] = (gt - gr - gp - gc).pow(2).sum().item()
+                    vals["resid"] = (gt - sum(gtask.values())).pow(2).sum().item()
                     vals["totsq"] = gt.pow(2).sum().item()
                 if prev is not None:
-                    vals["prevdot"] = {t: (x * prev[t][j].float()).sum().item() if prev[t][j] is not None else 0.0
-                                       for t, x in (("rgb", gr), ("point", gp), ("camera", gc))}
+                    vals["prevdot"] = {t: (gtask[t] * prev[t][j].float()).sum().item() if prev[t][j] is not None
+                                       else 0.0 for t in TASKS}
                 for g in gs:
                     a = acc[g]
                     for t in TASKS:
@@ -208,11 +218,17 @@ def main():
             tg = acc["renderer_target"]
             nr, npnt = tg["sq"]["rgb"] ** 0.5, tg["sq"]["point"] ** 0.5
             cos_rp = tg["dot"]["rgb|point"] / max(nr * npnt, 1e-30)
+            if "consistency" in TASKS:
+                ncs = tg["sq"]["consistency"] ** 0.5
+                add_cons = (f" |g_cons|={ncs:.4f} cons/point={ncs / max(npnt, 1e-30):.3f} "
+                            f"cos(p,c)={tg['dot']['point|consistency'] / max(npnt * ncs, 1e-30):+.3f}")
+            else:
+                add_cons = ""
             add = (f" | additivity resid/total (all params) = "
                    f"{(sum(acc[g]['resid'] for g in gnames if not g.startswith(('target_blk','rec_blk','target_in')))/max(sum(acc[g]['totsq'] for g in gnames if not g.startswith(('target_blk','rec_blk','target_in'))),1e-30))**0.5:.2e}"
                    if i < 3 else "")
             print(f"[td] step {step} b{i:02d} same_loss={same} | target stream |g_rgb|={nr:.4f} |g_point|={npnt:.4f} "
-                  f"cos={cos_rp:+.3f}{add} | {time.time()-t0:.0f}s", flush=True)
+                  f"cos={cos_rp:+.3f}{add_cons}{add} | {time.time()-t0:.0f}s", flush=True)
 
         # ---- summary over batches ----
         def med(xs):
@@ -256,6 +272,16 @@ def main():
                   f"{100*x['energy_share']['camera']:>5.1f}% | {x['cos_median']['rgb|point']:>+9.3f}{x['cos_median']['rgb|camera']:>+9.3f}"
                   f" | {100*x['point_bigger_frac_median']:>4.0f}% | {x['cos_prev_median']['rgb']:>+9.3f}"
                   f"{x['cos_prev_median']['point']:>+8.3f}{x['cos_prev_median']['camera']:>+9.3f}", flush=True)
+        if "consistency" in TASKS:
+            print(f"[td] {'group':<17} | {'|g_cons|':>9} {'E_cons':>7} {'cons/point':>11} {'cos(p,c)':>9} {'cos(r,c)':>9} {'cons_prev':>9}")
+            for g in order:
+                if g not in summ:
+                    continue
+                x = summ[g]
+                print(f"[td] {g:<17} | {x['norm_median']['consistency']:>9.4f} {100*x['energy_share']['consistency']:>6.1f}% "
+                      f"{x['norm_median']['consistency'] / max(x['norm_median']['point'], 1e-30):>11.3f} "
+                      f"{x['cos_median']['point|consistency']:>+9.3f} {x['cos_median']['rgb|consistency']:>+9.3f} "
+                      f"{x['cos_prev_median']['consistency']:>+9.3f}", flush=True)
         comp_med = {k: med([r["components"][k] for r in rows]) for k in rows[0]["components"]}
         print(f"[td] loss components (median): " + " ".join(f"{k}={v:.4f}" for k, v in comp_med.items()))
         print(f"[td] peak mem {torch.cuda.max_memory_allocated()/2**30:.1f} GiB | {time.time()-t0:.0f}s", flush=True)

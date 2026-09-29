@@ -161,7 +161,7 @@ class TrackTests(unittest.TestCase):
     def test_tracks_match_reference_all_neighbour_sets(self):
         for nb in ("exact", "omega4", "centre4"):
             ref_idx, ref_valid, _ = reference_tracks(self.depths, self.points, self.c2ws, self.K, neighbours=nb)
-            idx, valid = build_tracks(self.pts_gt, self.depth_t, self.c2w_t, self.K_t, tau=TAU, neighbours=nb)
+            idx, valid = build_tracks(self.pts_gt, self.depth_t, self.c2w_t, self.K_t, tau=TAU, neighbours=nb, border=1)
             valid = valid[0].numpy()
             idx = idx[0].numpy()
             self.assertEqual(int((valid != ref_valid).sum()), 0, nb)
@@ -172,15 +172,16 @@ class TrackTests(unittest.TestCase):
         _, v8 = build_tracks(self.pts_gt, self.depth_t, self.c2w_t, self.K_t, border=8)   # 8: reaches the sphere
         self.assertEqual(int((v8 & ~v1).sum()), 0)
         self.assertLess(int(v8.sum()), int(v1.sum()))
+        _, va = build_tracks(self.pts_gt, self.depth_t, self.c2w_t, self.K_t)
         _, vf = build_tracks(self.pts_gt, self.depth_t, self.c2w_t, self.K_t, query_views="first")
         self.assertEqual(int(vf[:, 1:].sum()), 0)
-        self.assertTrue(torch.equal(vf[:, 0], v1[:, 0]))
+        self.assertTrue(torch.equal(vf[:, 0], va[:, 0]))
 
     def test_loss_matches_reference_and_invariances(self):
         rng = np.random.default_rng(0)
         pred = self.points + 0.02 * rng.standard_normal(self.points.shape)
-        ref_idx, ref_valid, _ = reference_tracks(self.depths, self.points, self.c2ws, self.K)
-        ref, n = reference_loss(pred, self.points, ref_idx, ref_valid)
+        ref_idx, ref_valid, _ = reference_tracks(self.depths, self.points, self.c2ws, self.K, neighbours="centre4", border=4)
+        ref, n = reference_loss(pred, self.points, ref_idx, ref_valid)   # module defaults: centre4, border 4
         pe = torch.tensor(pred, dtype=torch.float32).permute(0, 3, 1, 2)[None].requires_grad_(True)
         out = track_consistency_loss(pe, self.pts_gt, self.depth_t, self.c2w_t, self.K_t, tau=TAU)
         self.assertAlmostEqual(float(out["loss_consistency"]), ref, places=5)
