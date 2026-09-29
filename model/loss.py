@@ -312,7 +312,8 @@ class MultiTaskLossComputer(LossComputer):
 
     def forward(self, rendering, target, exclude_bg,
         pts_est, pts_conf, pts_gt, pose_enc_list, extrinsics, intrinsics, image_hw,
-        align_pkg=None, align_weight=0.0, target_alpha_mask=None):
+        align_pkg=None, align_weight=0.0, target_alpha_mask=None,
+        target_depth=None, target_c2w=None, target_K=None):
 
         ### RGB loss (P4b: forward target_alpha_mask through to base LossComputer)
         loss_metrics = super().forward(
@@ -342,6 +343,17 @@ class MultiTaskLossComputer(LossComputer):
                 point_loss = point_loss * 0.5 + point_l1 * 0.5
             loss_metrics.update(point_loss_dict)
             loss_metrics['loss'] += point_loss * self.config.training.weight_point # 1
+
+        ### track-consistency loss between the target views (VGGT-Omega open-source style):
+        ### off unless training.weight_consistency > 0, so every existing config is bitwise unchanged
+        weight_consistency = float(self.config.training.get("weight_consistency", 0.0) or 0.0)
+        if weight_consistency > 0.0 and pts_gt is not None and target_depth is not None:
+            from model.track_consistency import track_consistency_loss
+            consistency_cfg = dict(self.config.training.get("consistency", None) or {})
+            consistency = track_consistency_loss(
+                pts_est, pts_gt, target_depth, target_c2w, target_K, **consistency_cfg)
+            loss_metrics.update(consistency)
+            loss_metrics['loss'] = loss_metrics['loss'] + consistency['loss_consistency'] * weight_consistency
 
         ### feature alignment loss (REPA-style negative cosine similarity)
         if align_pkg is not None and align_weight > 0:

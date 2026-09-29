@@ -250,6 +250,10 @@ class LagerNVSInRnG(nn.Module):
                 align_pkg=None,
                 align_weight=0.0,
                 target_alpha_mask=getattr(target, "alpha_mask", None),
+                # read only by the track-consistency loss (training.weight_consistency > 0)
+                target_depth=(target.depth_map.float() if hasattr(target, "depth_map") else None),
+                target_c2w=target.c2w.float(),
+                target_K=target.fxfycxcy.float(),
             )
             # export_results slices camera[-1][batch_idx * v_target], so lay the copies
             # out as (b v_target) to match.
