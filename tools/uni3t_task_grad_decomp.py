@@ -23,6 +23,7 @@ gradient is from batch to batch). The same batches are reused for every checkpoi
 """
 import importlib
 import json
+import os
 import random
 import sys
 import time
@@ -44,6 +45,10 @@ PAIRS = (("rgb", "point"), ("rgb", "camera"), ("point", "camera"))
 REC_SUBS = ("cross_attn_rec", "mlp_rec", "norm1_rec", "norm2_rec")
 BLK = "model.renderer.renderer_core.renderer_blocks."
 OUT_DIR = Path("/home/z50057756/tmp/uni3t_taskgrad")
+# TASKGRAD_EXCLUDE_BG=1: losses as in the first exclude_bg_frac of training (RGB on the foreground only, point
+# loss 1 x main + 0.01 x L1 instead of 0.5 + 0.5); TASKGRAD_TAG: suffix of the output file (runs do not overwrite)
+EXCLUDE_BG = os.environ.get("TASKGRAD_EXCLUDE_BG", "0") == "1"
+OUT_TAG = os.environ.get("TASKGRAD_TAG", "")
 
 
 def groups_of(name):
@@ -102,6 +107,7 @@ def main():
         PAIRS = PAIRS + (("rgb", "consistency"), ("point", "consistency"))
         print(f"[td] track-consistency task on: weight_consistency={cfg.training.weight_consistency} "
               f"consistency={dict(cfg.training.get('consistency', {}) or {})}", flush=True)
+    print(f"[td] exclude_bg={EXCLUDE_BG} (foreground-phase losses) out_tag={OUT_TAG!r}", flush=True)
     cfg.ddp_info = edict(global_rank=0, world_size=1, local_rank=0, device="cuda:0",
                          is_main_process=True, seed=int(cfg.training.get("seed", 777)))
     dev = "cuda"
@@ -155,7 +161,7 @@ def main():
                 model.zero_grad(set_to_none=True)
                 seed_all(10_000 + i)
                 with torch.autocast("cuda", dtype=torch.bfloat16):
-                    out = model(b, exclude_bg=False)       # all ckpts are past exclude_bg_until (9999)
+                    out = model(b, exclude_bg=EXCLUDE_BG)  # default False: all ckpts are past exclude_bg_until (9999)
                 parts = task_parts(cfg, out.loss_metrics)
                 lossvals[task] = float(parts["total"])
                 if task == "rgb":
@@ -285,7 +291,7 @@ def main():
         comp_med = {k: med([r["components"][k] for r in rows]) for k in rows[0]["components"]}
         print(f"[td] loss components (median): " + " ".join(f"{k}={v:.4f}" for k, v in comp_med.items()))
         print(f"[td] peak mem {torch.cuda.max_memory_allocated()/2**30:.1f} GiB | {time.time()-t0:.0f}s", flush=True)
-        out_f = OUT_DIR / f"taskgrad_step{step}.json"
+        out_f = OUT_DIR / f"taskgrad_step{step}{OUT_TAG}.json"
         json.dump({"config": cfg_path, "ckpt": ckpt, "step": step, "n_batches": len(rows),
                    "n_loss_mismatch": n_mismatch, "additivity": additivity, "summary": summ,
                    "components_median": comp_med,
