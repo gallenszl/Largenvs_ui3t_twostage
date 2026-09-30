@@ -36,7 +36,9 @@ training:
     query_views: all
     min_valid: 1
   ckpt_keep_latest: 2
-  ckpt_keep_steps: [30000, 60000, 90000]
+  # 66k/72k/76k kept for the step-matched candidate probe against the const arm (its noise band is 66/72/76k)
+  ckpt_keep_steps: [30000, 60000, 66000, 72000, 76000, 90000]
+  resume_fail_closed: true   # relays: a checkpoint that exists must load, never a silent restart from step 0
   amp_dtype: bf16
   use_bf16: false
   api_key_path: /home/z50057756/code/RnG_lagernvs/configs/api_keys.yaml   # read-only reference (never copied)
