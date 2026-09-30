@@ -552,10 +552,17 @@ sbatch scripts_s2/s2_graph_bench.sbatch <任一第二阶段 ckpt> <输出前缀>
 | `configs/RnGUP_lagernvs_uni3t_cons512_90k_all287k.yaml` | `PLN2uni3t_cons512_all287k_b32t6_fp32lr35_const` | 主臂,从零 90k |
 | `configs/RnGUP_lagernvs_uni3t_consdense_90k_all287k.yaml` | `PLN2uni3t_consdense_all287k_b32t6_fp32lr35_const` | 消融:全算 |
 
-**怎么跑。**
-1. 先跑梯度探针定权重(1 卡):`python tools/uni3t_task_grad_decomp.py configs/RnGUP_lagernvs_uni3t_cons512_90k_all287k.yaml 12 <const ckpt_60000>`。规则:一致性项在渲染器目标流各块的梯度能量占点图任务的 20–100%,不在就按比例改 `weight_consistency`。
-2. 冒烟臂:把 const 臂的 `ckpt_0000000000060000.pt` 复制或硬链接进该配置的 `checkpoint_dir`,再 `CONFIG=configs/RnGUP_lagernvs_uni3t_cons512_from60k_66k_all287k.yaml NPROC=4 sbatch scripts/pln2_train_8h200.sbatch`(4 卡,6k 步约 6.8 小时)。过关:无 NaN 跳步、`loss_consistency` 下降、62k/64k/66k 的 subset64 LPIPS 与 const 臂同步数差 < 0.003。
-3. 主臂与消融臂:同一启动器换配置,各 90k(约 4.2 天,4 卡,守护用 `scripts/pln2_uni3t_watchdog.sh` 同款)。训练内评测设置与 const 臂完全一致,同步数可直接配对。
+**怎么跑。** 启动器一律用 `scripts_s2/uni3t_train_4gpu.sbatch <config>`(4 卡,2 天,目录里有 ckpt 就全状态续训)。**不要用 `scripts/pln2_train_8h200.sbatch`**:它是原仓启动器的快照,会 cd 到原仓,跑的是没有这个损失的代码。
+1. 先跑梯度探针定权重(1 卡):`sbatch --qos=lowest --time=00:45:00 scripts_s2/s2_py1gpu.sbatch tools/uni3t_task_grad_decomp.py <config> 12 <const ckpt_60000>`。规则:一致性项在共享层(渲染器目标流、连接层、VGGT)的梯度能量占点图任务的 20–100%,不在就按比例改 `weight_consistency`。输出文件名只按步数命名(`~/tmp/uni3t_taskgrad/taskgrad_step60000.json`),连跑两个配置会互相覆盖。
+2. 冒烟臂:把 const 臂的 `ckpt_0000000000060000.pt` 复制或硬链接进该配置的 `checkpoint_dir`,再 `sbatch scripts_s2/uni3t_train_4gpu.sbatch configs/RnGUP_lagernvs_uni3t_cons512_from60k_66k_all287k.yaml`(6k 步约 7 小时)。过关检查:`python3 tools/uni3t_smoke_gates.py --exp_dir <冒烟目录> --ref_dir <const 目录> --log <冒烟 .out> --steps 62000 64000 66000`(只把 `skipping optimizer step` 算作跳步,`grad norm too large X > 2.0` 只是警告;LPIPS 与 const 同步数差 ≤ 0.003)。
+3. 主臂与消融臂:同一启动器换配置,各 90k(约 4.4 天,要接力:再挂两个同命令,`--dependency=afternotok:<上一个 job> --kill-on-invalid-dep=yes`)。要停一条臂,先 `scancel` 接力再停主 job,否则接力会被触发。训练内评测设置与 const 臂完全一致,同步数可直接配对。
+
+**进展(2026-09-30)。**
+- 冒烟 job 138463(const ckpt_60000 → 66k,权重 0.2)通过:跳步 0;LPIPS 对 const 同步数 62k +0.0001 / 64k +0.0006 / 66k −0.0029;66k 候选探针有位姿均值 4.10 px、中位 2.25 px、37 格半径 1 命中 93.7%,全部落在 const 自身 66k/72k/76k 的起伏里(均值 3.68–4.05、中位 2.00–2.25、命中 93.4–94.8%)。权重 0.2 时本来就预期看不出差别。
+- 梯度探针 job 138464(const ckpt_60000,cons512,权重 0.2):一致性项梯度长度约为点图项的 0.10(能量约 1%),方向同向(余弦 +0.35 到 +0.78)。全算配置 job 138665 几乎相同(目标流 0.104、连接层 0.085、VGGT 0.110)。按规则两条 90k 臂的权重都改为 1.0(能量约 20–30%),两条臂只差轨迹数。
+- 两条 90k 臂已提交(normal,4 卡,各挂两个接力):主臂 138666(接力 138667/138668),消融臂 138669(接力 138670/138671)。
+- 两条 90k 臂另加:`ckpt_keep_steps` 多留 66k/72k/76k(与 const 臂噪声带同步数,跑候选探针要用);`resume_fail_closed: true`(接力时 ckpt 载不进就报错,不会悄悄从第 0 步重来)。
+- 结果文件:`docs/probe_results/*.json.gz`(存成 .gz 是因为 W&B 代码备份会收仓里所有 .json,上限约 6 MB)。
 
 **判读(事先定)。** 主判:`tools_s2/s2_candidate_probe.py` 在 subset64 上的有位姿投影误差(均值、中位)与 37 格半径 1 命中率,新臂 vs `PLN2uni3t_all287k_b32t6_fp32lr35_const` 同步数;改善要超出 const 臂自身 66k / 72k / 76k 三点的起伏(噪声带,JSON 在 `docs/probe_results/`)。辅判:subset64 LPIPS 同步数差,0.003 为信号线;abs_rel 照报。
 

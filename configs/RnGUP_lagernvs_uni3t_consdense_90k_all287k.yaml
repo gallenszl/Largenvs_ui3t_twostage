@@ -25,7 +25,9 @@ exp_name: PLN2uni3t_consdense_all287k_b32t6_fp32lr35_const
 unposed: true
 training:
   # track-consistency loss between the target views (VGGT-Omega open-source style); plan 2026-09-29
-  weight_consistency: 0.2
+  # 0.2 -> 1.0 (09-30), same as the cons512 arm: at 0.2 this dense config's gradient on the shared layers is
+  # ~0.10x the point task's norm (job 138665; cons512 job 138464 ~0.10x), so one weight keeps both in the 20-100% band
+  weight_consistency: 1.0
   consistency:
     tau: 0.01
     abs_tol: 0.0
