@@ -561,6 +561,8 @@ sbatch scripts_s2/s2_graph_bench.sbatch <任一第二阶段 ckpt> <输出前缀>
 - 冒烟 job 138463(const ckpt_60000 → 66k,权重 0.2)通过:跳步 0;LPIPS 对 const 同步数 62k +0.0001 / 64k +0.0006 / 66k −0.0029;66k 候选探针有位姿均值 4.10 px、中位 2.25 px、37 格半径 1 命中 93.7%,全部落在 const 自身 66k/72k/76k 的起伏里(均值 3.68–4.05、中位 2.00–2.25、命中 93.4–94.8%)。权重 0.2 时本来就预期看不出差别。
 - 梯度探针 job 138464(const ckpt_60000,cons512,权重 0.2):一致性项梯度长度约为点图项的 0.10(能量约 1%),方向同向(余弦 +0.35 到 +0.78)。全算配置 job 138665 几乎相同(目标流 0.104、连接层 0.085、VGGT 0.110)。按规则两条 90k 臂的权重都改为 1.0(能量约 20–30%),两条臂只差轨迹数。
 - 两条 90k 臂已提交(normal,4 卡,各挂两个接力):主臂 138666(接力 138667/138668),消融臂 138669(接力 138670/138671)。
+- 全量 GSO 评测(1030 物体,`scripts_s2/uni3t_fulleval_gso.sbatch`,对比 `tools_s2/uni3t_eval_compare.py`,结果 `docs/probe_results/fulleval_cmp_66k_*.json.gz`):冒烟 66k 对 const 66k 有位姿 PSNR +0.67 / LPIPS −0.0044 / abs_rel −0.0017 / Auc_30 +0.57,无位姿 PSNR +0.23 / LPIPS −0.0023 / Auc_30 +1.17;但 const 自己 66k 是 66k/72k/76k 里最差的一点,14 项里 13 项落在 const 66k–76k 的范围内,不能算作损失的效果。
+- 注意:gpu04 读旧盘 JuiceFS 会卡死(作业停在启动),两条臂与评测都加了 `--exclude=lrc-alpha-sg-gpu04`。
 - 两条 90k 臂另加:`ckpt_keep_steps` 多留 66k/72k/76k(与 const 臂噪声带同步数,跑候选探针要用);`resume_fail_closed: true`(接力时 ckpt 载不进就报错,不会悄悄从第 0 步重来)。
 - 结果文件:`docs/probe_results/*.json.gz`(存成 .gz 是因为 W&B 代码备份会收仓里所有 .json,上限约 6 MB)。
 
