@@ -229,6 +229,34 @@ class TrackTests(unittest.TestCase):
                                      num_tracks=k, generator=g)
         self.assertLess(int(sub["consistency_valid"]), int(dense["consistency_valid"]))
 
+    def test_tophalf_sampling(self):
+        """'tophalf' keeps exactly n_fg // 2 query pixels per (sample, view): the half of the foreground seen by the
+        most other views (ties broken at random), every entry of those pixels, and nothing else."""
+        _, valid = build_tracks(self.pts_gt, self.depth_t, self.c2w_t, self.K_t)
+        fg = self.depth_t > 0
+        g = torch.Generator().manual_seed(0)
+        sel = sample_tracks(valid, fg, None, "tophalf", g)
+        self.assertEqual(int((sel & ~valid).sum()), 0)                                   # only ever removes entries
+        count = valid.sum(2)[0]                                                           # [Va, H, W]
+        for a in range(fg.shape[1]):
+            n_fg = int(fg[0, a].sum())
+            # the kept query pixels are those whose entries survive; pixels with count 0 are invisible either way
+            kept_pixels = sel.any(2)[0, a] & fg[0, a]
+            pool_counts = torch.sort(count[a][fg[0, a]], descending=True).values[: n_fg // 2]
+            n_kept_with_entries = int((pool_counts > 0).sum())
+            self.assertEqual(int(kept_pixels.sum()), n_kept_with_entries)                 # top half, all of them
+            self.assertTrue(bool((count[a][kept_pixels] >= pool_counts.min()).all()))     # ranking respected
+            dropped = fg[0, a] & ~kept_pixels & (count[a] > 0)
+            if int(dropped.sum()):
+                self.assertTrue(bool((count[a][dropped] <= pool_counts.min()).all()))     # nothing better was dropped
+            # every surviving pixel keeps ALL of its valid entries (no per-entry subsampling)
+            self.assertTrue(torch.equal(sel[0, a][:, kept_pixels], valid[0, a][:, kept_pixels]))
+        th = track_consistency_loss(self.pts_gt.clone(), self.pts_gt, self.depth_t, self.c2w_t, self.K_t,
+                                    num_tracks=None, sampling="tophalf", generator=g)
+        dense = track_consistency_loss(self.pts_gt.clone(), self.pts_gt, self.depth_t, self.c2w_t, self.K_t)
+        self.assertLess(int(th["consistency_valid"]), int(dense["consistency_valid"]))
+        self.assertGreater(int(th["consistency_valid"]), int(dense["consistency_valid"]) // 2)   # top half carries most entries
+
     def test_agrees_with_stage2_geometry(self):
         """Same pixel choice as model_s2/geometry.py (stage-2 tables) on GT: index-unit round == continuous floor;
         the visibility masks differ only where the two tolerance formulas differ (|z - D| between tau*z and tau*D)."""

@@ -82,14 +82,17 @@ def build_tracks(pts_gt, depth, c2w, K, tau=0.01, abs_tol=0.0, neighbours="centr
 
 
 def sample_tracks(valid, fg, num_tracks, scheme="omega", generator=None):
-    """Restrict valid [B, Va, Vb, H, W] to num_tracks query pixels per (sample, query view).
+    """Restrict valid [B, Va, Vb, H, W] to a subset of query pixels per (sample, query view).
 
     scheme 'omega'  : rank foreground pixels by how many other views see them (random tie-break); when half of
                       the foreground exceeds num_tracks keep only that top half; then num_tracks at random.
     scheme 'uniform': num_tracks at random among the foreground pixels seen by at least one other view.
-    No host synchronisation (two sorts per step).
+    scheme 'tophalf': keep EVERY foreground pixel in the top half of that ranking (n_fg // 2 pixels per view),
+                      no random draw; num_tracks is ignored (user 2026-10-03: "the top 50 %, not 512 of them").
+    num_tracks=None with 'omega' / 'uniform' means dense (every visible pair).
+    No host synchronisation (two sorts per step; one for 'tophalf').
     """
-    if num_tracks is None:
+    if num_tracks is None and scheme != "tophalf":
         return valid
     B, Va, Vb, H, W = valid.shape
     HW = H * W
@@ -97,6 +100,13 @@ def sample_tracks(valid, fg, num_tracks, scheme="omega", generator=None):
     count = valid.sum(2).reshape(B, Va, HW).float()
     fgf = fg.reshape(B, Va, HW)
     r1 = torch.rand(B, Va, HW, device=dev, generator=generator)
+    if scheme == "tophalf":
+        n_fg = fgf.sum(-1, keepdim=True)                                         # [B, Va, 1]
+        key = torch.where(fgf, count + 0.5 * r1, torch.full_like(count, -1.0))   # descending: count, then random
+        rank = torch.empty_like(key, dtype=torch.long)
+        rank.scatter_(-1, torch.argsort(key, dim=-1, descending=True), torch.arange(HW, device=dev).expand(B, Va, HW))
+        sel = fgf & (rank < n_fg // 2)
+        return valid & sel.reshape(B, Va, 1, H, W)
     if scheme == "omega":
         n_fg = fgf.sum(-1, keepdim=True)                                         # [B, Va, 1]
         pool_size = torch.where(n_fg // 2 > num_tracks, n_fg // 2, n_fg)
