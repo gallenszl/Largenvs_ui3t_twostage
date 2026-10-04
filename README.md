@@ -563,6 +563,8 @@ sbatch scripts_s2/s2_graph_bench.sbatch <任一第二阶段 ckpt> <输出前缀>
 - 两条 90k 臂已提交(normal,4 卡,各挂两个接力):主臂 138666(接力 138667/138668),消融臂 138669(接力 138670/138671)。
 - 全量 GSO 评测(1030 物体,`scripts_s2/uni3t_fulleval_gso.sbatch`,对比 `tools_s2/uni3t_eval_compare.py`,结果 `docs/probe_results/fulleval_cmp_66k_*.json.gz`):冒烟 66k 对 const 66k 有位姿 PSNR +0.67 / LPIPS −0.0044 / abs_rel −0.0017 / Auc_30 +0.57,无位姿 PSNR +0.23 / LPIPS −0.0023 / Auc_30 +1.17;但 const 自己 66k 是 66k/72k/76k 里最差的一点,14 项里 13 项落在 const 66k–76k 的范围内,不能算作损失的效果。
 - 注意:gpu04 读旧盘 JuiceFS 会卡死(作业停在启动),两条臂与评测都加了 `--exclude=lrc-alpha-sg-gpu04`。
+- **10-02/10-03 判读**:1.0 主臂 10-02 停于 36k(subset64 20k–36k 九点 LPIPS 对 uni3t 稳定 +0.006、几何持平);0.5 臂(`PLN2uni3t_cons512w05_all287k_b32t6_fp32lr35_const`)10-03 停于 40k。**36k 同步数三方对比**(uni3t 36k 从 HF 拉取):投影误差探针 有位姿均值 4.53 / 4.68 / 4.51 px、中位均 2.75、命中 92.8 / 92.0 / 93.0%(uni3t / w0.5 / w1.0),全部在 uni3t 66–76k 的起伏(0.37 px、1.4 点)内;全量 GSO 1030 物体 有位姿 LPIPS 0.1368 / 0.1389 / 0.1428、PSNR 23.18 / 23.33 / 23.42、abs_rel 0.0198 / 0.0198 / 0.0200,无位姿 LPIPS 0.1416 / 0.1439 / 0.1495、Racc_5 78.2 / 83.7 / 79.5%。结论:一致性损失(512 条 Ω 采样)对投影误差与深度无可测收益,LPIPS 代价随权重增大(0.5 约 +0.002,1.0 约 +0.006~0.008);结果 `docs/probe_results/*36k*`。
+- 10-03 起新臂 `PLN2uni3t_constop50_all287k_b32t6_fp32lr35_const`(configs/RnGUP_lagernvs_uni3t_constop50_90k_all287k.yaml):采样 `tophalf` = 可见数排前 50% 的前景像素全部进损失(不抽 512),权重 0.5。
 - 两条 90k 臂另加:`ckpt_keep_steps` 多留 66k/72k/76k(与 const 臂噪声带同步数,跑候选探针要用);`resume_fail_closed: true`(接力时 ckpt 载不进就报错,不会悄悄从第 0 步重来)。
 - 结果文件:`docs/probe_results/*.json.gz`(存成 .gz 是因为 W&B 代码备份会收仓里所有 .json,上限约 6 MB)。
 
