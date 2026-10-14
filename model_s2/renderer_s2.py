@@ -16,8 +16,9 @@ OUT_LAYERS = (2, 5, 8, 11)
 
 
 class Stage2Renderer(nn.Module):
-    def __init__(self, s1_renderer, patch, num_heads=12):
+    def __init__(self, s1_renderer, patch, num_heads=12, structure="current"):
         super().__init__()
+        self.structure = structure
         C = s1_renderer.tgt_norm.normalized_shape[0]
         self.patch = patch
         self.hidden = C
@@ -37,7 +38,8 @@ class Stage2Renderer(nn.Module):
         blocks = []
         s1_blocks = s1_renderer.renderer_core.renderer_blocks
         for i, b1 in enumerate(s1_blocks):
-            b2 = S2BidirBlock(C, num_heads) if i < len(s1_blocks) - 1 else S2FinalBlock(C, num_heads)
+            b2 = (S2BidirBlock(C, num_heads, structure) if i < len(s1_blocks) - 1
+                  else S2FinalBlock(C, num_heads, structure))
             missing, unexpected = b2.load_state_dict(b1.state_dict(), strict=False)
             if unexpected or any(k.split(".")[0] not in b2.new_module_names() for k in missing):
                 raise RuntimeError(f"block {i}: stage-1 weights do not map onto the stage-2 block "
@@ -53,7 +55,8 @@ class Stage2Renderer(nn.Module):
         self.to(w1.device)
 
     def forward(self, rays6, mask1, rec_rep, ctx):
-        """rays6 [B, Vt, 6, H, W], mask1 [B, Vt, 1, H, W], rec_rep [BV, S, C] -> {m: Lin_m(t2(m)) [nfg, C]}"""
+        """rays6 [B, Vt, 6, H, W], mask1 [B, Vt, 1, H, W], rec_rep [BV, S, C] -> {m: Lin_m(t2(m)) [nfg, C]}
+        fg_dense / fg_dual: the scene stream is the kept foreground scene tokens only, rows ctx.scene_idx [Ts, C]"""
         lay = ctx.layout
         C = self.hidden
         x_in = torch.cat([rays6, mask1.to(rays6.dtype)], dim=2).flatten(0, 1)
@@ -64,7 +67,7 @@ class Stage2Renderer(nn.Module):
         regs = self.registers.expand(lay.BV, N_REG, C).reshape(-1, C)
         x = fg.new_zeros(lay.T, C)
         x = x.index_copy(0, lay.fg_packed, fg).index_copy(0, lay.reg_packed, regs.to(fg.dtype))
-        rec = rec_rep
+        rec = rec_rep if self.structure == "current" else rec_rep.reshape(-1, C)[ctx.scene_idx]
         outs = {}
         last = len(self.blocks) - 1
         for i, blk in enumerate(self.blocks):

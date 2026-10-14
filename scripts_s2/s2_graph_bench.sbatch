@@ -1,22 +1,15 @@
 #!/bin/bash
 #SBATCH --job-name=s2-graph
-#SBATCH --partition=gpu
-#SBATCH --qos=normal
 #SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --gres=gpu:h200:1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=160G
+#SBATCH --gpus=1
 #SBATCH --time=00:50:00
-#SBATCH --no-requeue
-#SBATCH --exclude=lrc-alpha-sg-gpu12
-#SBATCH --output=/home/z50057756/code/RnG_lagernvs_stage2/slurm_logs/%x-%j.out
-#SBATCH --error=/home/z50057756/code/RnG_lagernvs_stage2/slurm_logs/%x-%j.err
+#SBATCH --output=/home/u6ga/zhelun.u6ga/Largenvs_ui3t_twostage/slurm_logs/%x-%j.out
+#SBATCH --error=/home/u6ga/zhelun.u6ga/Largenvs_ui3t_twostage/slurm_logs/%x-%j.err
 # bf16 weights + CUDA Graphs at batch 1 (tools_s2/s2_graph_bench.py): one process per target-view count (1, then 10)
 # on the same node, so that a failed capture in one cannot take the other down.
 #   sbatch scripts_s2/s2_graph_bench.sbatch <stage-2 ckpt> <output prefix>   -> <prefix>_vt1.json, <prefix>_vt10.json
 set -uo pipefail
-source /home/z50057756/code/RnG_lagernvs_stage2/scripts_s2/s2_env.sh
+source /home/u6ga/zhelun.u6ga/Largenvs_ui3t_twostage/scripts_s2/s2_env.sh
 export PYTORCH_CUDA_ALLOC_CONF=      # default caching allocator (no expandable segments) for graph capture
 CKPT=$1
 OUT=$2

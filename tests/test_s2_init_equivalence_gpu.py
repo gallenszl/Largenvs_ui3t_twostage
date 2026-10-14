@@ -195,5 +195,131 @@ class InitEquivalenceTests(unittest.TestCase):
         del m4
 
 
+S2_FG_CFG = {"fg_dense": os.path.join(REPO, "configs/S2P8fgdense_uni3t70k_b32t6_lr35_a21k26k.yaml"),
+             "fg_dual": os.path.join(REPO, "configs/S2P8fgdual_uni3t70k_b32t6_lr35_a21k26k.yaml"),
+             "s1sel_s1mask": os.path.join(REPO, "configs/S2P8fgdense_s1sel1_s1mask_uni3t70k_b32t6_lr35_a21k26k.yaml"),
+             "s1sel_nomask": os.path.join(REPO, "configs/S2P8fgdense_s1sel1_nomask_uni3t70k_b32t6_lr35_a21k26k.yaml")}
+
+
+@unittest.skipUnless(CUDA, "needs a GPU")
+class FgStructureInitTests(unittest.TestCase):
+    """fg_dense / fg_dual, block 8 (user 09-28): step 0 equals the stock stage 1 bitwise (posed and unposed); one
+    AdamW step gives every trainable parameter a finite gradient, moves Lin_m and leaves stage 1 untouched.
+    s1sel_*: fg_dense with the refined tiles taken from the stage-1 render (painted tiles + one ring) instead of the
+    GT target mask: the tile count equals an explicit numpy recount from the stage-1 render; at the second step the
+    mask channel's weights get exactly zero gradient when the channel is all zero (nomask) and a nonzero one
+    otherwise."""
+
+    @classmethod
+    def setUpClass(cls):
+        import torch.distributed as dist
+        if not dist.is_initialized():
+            os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+            os.environ.setdefault("MASTER_PORT", str(29500 + int(os.environ.get("SLURM_JOB_ID", "7")) % 400))
+            dist.init_process_group("gloo", rank=0, world_size=1)
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        os.chdir(REPO)
+        from model.lagernvs_wrapper import LagerNVSInRnG
+        cfg = load_cfg(S2_FG_CFG["fg_dense"])
+        ref = LagerNVSInRnG(load_cfg(S1_CFG))
+        sd = torch.load(cfg.model.stage2.stage1_ckpt, map_location="cpu", weights_only=True, mmap=True)["model"]
+        missing, unexpected = ref.load_state_dict(sd, strict=False)
+        assert all(k.startswith("loss_computer.") for k in list(missing) + list(unexpected)), (missing, unexpected)
+        cls.ref = ref.cuda().eval()
+        cls.batch = val_batch(cfg, 0)
+
+    def _check(self, key):
+        from model_s2.stage2_wrapper import Stage2LagerNVS
+        from utils.training_utils import create_optimizer
+        structure = "fg_dense" if key.startswith("s1sel") else key
+        m = Stage2LagerNVS(load_cfg(S2_FG_CFG[key])).cuda().eval()
+        self.assertEqual(m.structure, structure)
+        self.assertEqual((m.target_select, m.mask_input), {"s1sel_s1mask": ("stage1", "stage1"),
+                                                           "s1sel_nomask": ("stage1", "zero")}.get(key, ("gt", "gt")))
+        try:
+            for zp in (0.0, 1.0):
+                self.ref.val_cam_cond_zero_p = zp
+                m.val_cam_cond_zero_p = zp
+                with torch.no_grad(), torch.autocast(**AMP):
+                    seed_all(123)
+                    r = self.ref(self.batch, target_has_input=False, is_valid=True)
+                    seed_all(123)
+                    s = m(self.batch, target_has_input=False, is_valid=True)
+                self.assertTrue(torch.equal(s.render, r.render), f"{key} zero_p {zp}: init render != stage 1")
+                self.assertTrue(torch.equal(s.points, r.points), f"{key} zero_p {zp}: init points != stage 1")
+                if key.startswith("s1sel"):
+                    # explicit recount from the stage-1 render: pixel painted if a channel < 0.9, 8x8 tiles, one ring
+                    rs = s.render_s1.float().cpu().numpy()[0]                        # [Vt, 3, H, W]
+                    counts = []
+                    for v in range(rs.shape[0]):
+                        pt = (rs[v] < 0.9).any(0)                                    # [H, W]
+                        g = pt.shape[0] // 8
+                        tile = pt.reshape(g, 8, g, 8).any(axis=(1, 3))
+                        grown = np.zeros_like(tile)
+                        for i in range(g):
+                            for j in range(g):
+                                grown[i, j] = tile[max(0, i - 1):i + 2, max(0, j - 1):j + 2].any()
+                        counts.append(int(grown.sum()))
+                    self.assertEqual(float(s.loss_metrics.s2_fg_tokens), float(np.mean(counts)), key)
+                    print(f"[s2-gpu] {key} zero_p {zp}: refined tiles per view {np.mean(counts):.1f} (explicit recount "
+                          f"matches), GT pixels outside {float(s.loss_metrics.s2_sel_gt_miss):.4f}", flush=True)
+                print(f"[s2-gpu] {key} zero_p {zp}: bitwise equal to stage 1, scene fg share "
+                      f"{s.loss_metrics.s2_scene_fg_share:.3f}", flush=True)
+            s1_params = [p for _, p in list(m.stage1.model.named_parameters())[::50]]
+            before = tensor_hash(s1_params)
+            opt, _, _ = create_optimizer(m, 0.05, 3.5e-5, (0.9, 0.95))
+            m.train()
+            with torch.autocast(**AMP):
+                seed_all(3)
+                out = m(self.batch, target_has_input=False, is_valid=False)
+            loss = out.loss_metrics.loss
+            self.assertTrue(bool(torch.isfinite(loss)))
+            loss.backward()
+            for n, p in m.named_parameters():
+                if p.requires_grad:
+                    self.assertIsNotNone(p.grad, f"{structure}: {n} has no gradient")
+                    self.assertTrue(bool(torch.isfinite(p.grad).all()), f"{structure}: {n}")
+            self.assertGreater(float(m.renderer.out_lin[3].weight.grad.abs().max()), 0.0)
+            opt.step()
+            self.assertGreater(float(m.renderer.out_lin[3].weight.abs().max()), 0.0)
+            self.assertEqual(before, tensor_hash(s1_params))
+            # step 2: at init the zero Lin_m outputs block every gradient upstream of them (the target embedding's
+            # included -- that is what makes step 0 equal stage 1); after one step they are nonzero, so the target
+            # embedding now gets a gradient: nonzero on the ray channels, and on the mask channel exactly zero when
+            # that channel is all zero (nomask), nonzero when it carries a mask
+            opt.zero_grad(set_to_none=True)
+            with torch.autocast(**AMP):
+                seed_all(4)
+                out2 = m(self.batch, target_has_input=False, is_valid=False)
+            out2.loss_metrics.loss.backward()
+            gray = float(m.renderer.tgt_proj.weight.grad[:, :6].abs().max())
+            gmask = float(m.renderer.tgt_proj.weight.grad[:, 6:].abs().max())
+            self.assertGreater(gray, 0.0, key)
+            if key == "s1sel_nomask":
+                self.assertEqual(gmask, 0.0, "all-zero mask channel must get no gradient")
+            else:
+                self.assertGreater(gmask, 0.0, key)
+            print(f"[s2-gpu] {key}: step-2 target-embedding gradient max |g| rays {gray:.3e}, mask channel "
+                  f"{gmask:.3e}", flush=True)
+            print(f"[s2-gpu] {key}: one AdamW step ok, trainable params "
+                  f"{sum(p.numel() for p in m.parameters() if p.requires_grad) / 1e6:.1f}M", flush=True)
+        finally:
+            del m
+            torch.cuda.empty_cache()
+
+    def test_fg_dense(self):
+        self._check("fg_dense")
+
+    def test_fg_dual(self):
+        self._check("fg_dual")
+
+    def test_s1sel_s1mask(self):
+        self._check("s1sel_s1mask")
+
+    def test_s1sel_nomask(self):
+        self._check("s1sel_nomask")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,16 +1,10 @@
 #!/bin/bash
 #SBATCH --job-name=s2-smoke
-#SBATCH --partition=gpu
-#SBATCH --qos=normal
 #SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --gres=gpu:h200:1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=180G
+#SBATCH --gpus=1
 #SBATCH --time=01:30:00
-#SBATCH --no-requeue
-#SBATCH --output=/home/z50057756/code/RnG_lagernvs_stage2/slurm_logs/%x-%j.out
-#SBATCH --error=/home/z50057756/code/RnG_lagernvs_stage2/slurm_logs/%x-%j.err
+#SBATCH --output=/home/u6ga/zhelun.u6ga/Largenvs_ui3t_twostage/slurm_logs/%x-%j.out
+#SBATCH --error=/home/u6ga/zhelun.u6ga/Largenvs_ui3t_twostage/slurm_logs/%x-%j.err
 # Stage-2 smoke (plan G7), 1 GPU: $1 config.
 #   leg 0  dynamics probe: one fixed batch, 40 AdamW steps (tools_s2/s2_dynamics_probe.py; its gates are recorded,
 #          the smoke continues so one run reports every leg)
@@ -19,11 +13,11 @@
 #   leg C  fail-closed: a truncated newest checkpoint must stop the run with a [resume] error
 #   leg D  dynamics: zero-init output layers must have moved; checkpoint keys = trainable keys
 set -uo pipefail
-source /home/z50057756/code/RnG_lagernvs_stage2/scripts_s2/s2_env.sh
+source /home/u6ga/zhelun.u6ga/Largenvs_ui3t_twostage/scripts_s2/s2_env.sh
 export WANDB_MODE=offline
 CONFIG=${1:?config}
 EXP=$(grep -E "^exp_name:" "$CONFIG" | awk '{print $2}')_SMOKE_${SLURM_JOB_ID}
-SD=/mnt/data-alpha-sg-01/team-camera/home/z50057756/moe_experiments/SMOKE/$EXP
+SD=$S2_ROOT/SMOKE/$EXP
 mkdir -p "$SD"
 COMMON="exp_name=$EXP training.checkpoint_dir=$SD training.validation_out_dir=$SD training.batch_size_per_gpu=2 \
  training.num_workers=4 training.prefetch_factor=2 training.warmup=10 training.anneal_from_step=50 \

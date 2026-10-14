@@ -50,17 +50,23 @@ if ddp_info.is_main_process:
 dist.barrier()
 
 amp = dict(enabled=config.training.use_amp, device_type="cuda", dtype=torch.bfloat16)
-with torch.no_grad(), torch.autocast(**amp):
+# inference.metrics_autocast (default true = unchanged): metrics (LPIPS's VGG, points -> depth) inside bf16 autocast,
+# as the stock inference.py.  false = outside autocast (fp32), as train.py's validation computes them -- the G9
+# step-0 reference must use that (09-28: the two differ by 1-2 bf16 LPIPS steps and ~3 % abs_rel on identical images)
+metrics_amp = dict(amp, enabled=amp["enabled"] and bool(config.inference.get("metrics_autocast", True)))
+with torch.no_grad():
     for i, batch in enumerate(loader):
         batch = {k: v.to(ddp_info.device) if torch.is_tensor(v) else v for k, v in batch.items()}
-        res = model(batch, target_has_input=False, is_valid=True)
-        export_results(res, out_s2, compute_metrics=True)
-        save_region_metrics(res, out_s2)
-        if model.enabled:
-            r1 = edict(input=res.input, target=res.target, render=res.render_s1, points=res.points_s1,
-                       camera=res.camera)
-            export_results(r1, out_s1, compute_metrics=True)
-            save_region_metrics(r1, out_s1)
+        with torch.autocast(**amp):
+            res = model(batch, target_has_input=False, is_valid=True)
+        with torch.autocast(**metrics_amp):
+            export_results(res, out_s2, compute_metrics=True)
+            save_region_metrics(res, out_s2)
+            if model.enabled:
+                r1 = edict(input=res.input, target=res.target, render=res.render_s1, points=res.points_s1,
+                           camera=res.camera)
+                export_results(r1, out_s1, compute_metrics=True)
+                save_region_metrics(r1, out_s1)
         if ddp_info.is_main_process and i % 50 == 0:
             print(f"[s2-eval] object {i}", flush=True)
     torch.cuda.empty_cache()

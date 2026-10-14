@@ -149,7 +149,9 @@ def main():
     res = json.load(open(args.out)) if os.path.exists(args.out) else {}
     for cpath in args.configs.split(","):
         cfg = load_cfg(cpath, args.batch)
-        tag = os.path.basename(cpath).split("_")[0]
+        # the leg key must be unique per config: the old key (file name up to the first "_") made
+        # S2P8fgdense_s1sel1_... collide with S2P8fgdense_... and skipped it as "already measured" (job 6922991)
+        tag = str(cfg.get("exp_name") or os.path.basename(cpath).split("_")[0])
         todo = [bk for bk in args.backends.split(",") if f"{tag}_{bk}" not in res]
         if not todo:
             continue

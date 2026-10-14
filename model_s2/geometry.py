@@ -157,8 +157,28 @@ class Layout:
     tblock_valid: torch.Tensor  # [BV, SUM_COLS] block has at least one fg token
 
 
+def stage1_painted(render, tau=0.1):
+    """render [B, V, 3, H, W] in [0, 1] (the stage-1 render of the target views) -> [B, V, 1, H, W] float {0, 1}:
+    1 where some colour channel is more than tau below white, i.e. where stage 1 painted the object or its halo (the
+    GSO / Objaverse backgrounds are white)."""
+    return ((1.0 - render.float().amin(dim=2, keepdim=True)) > tau).float()
+
+
+def tiles_from_painted(painted, patch, dilate=1):
+    """painted [B, V, 1, H, W] {0, 1} -> [B, V, 1, H, W] {0, 1}: every patch x patch tile holding a painted pixel,
+    grown by `dilate` tiles (3 x 3 neighbourhood per step), written back as whole tiles so that build_layout's
+    max-pool selects exactly these tiles (user 09-28: the refined tiles come from the stage-1 render, not from the
+    GT target mask, which does not exist at test time; one ring covered all but 1 of 640 GSO views)."""
+    B, V, _, H, W = painted.shape
+    t = F.max_pool2d(painted.reshape(B * V, 1, H, W).float(), patch)
+    for _ in range(int(dilate)):
+        t = F.max_pool2d(t, 3, stride=1, padding=1)
+    return t.repeat_interleave(patch, dim=2).repeat_interleave(patch, dim=3).reshape(B, V, 1, H, W)
+
+
 def build_layout(alpha_t, patch, bucket, img, tblock_px=32):
-    """alpha_t [B, Vt, 1, H, W] (GT target alpha) -> Layout (one host sync: the fg counts)."""
+    """alpha_t [B, Vt, 1, H, W] (the pixel mask of the tiles to refine: the GT target alpha, or
+    tiles_from_painted of the stage-1 render) -> Layout (one host sync: the fg counts)."""
     B, Vt = alpha_t.shape[:2]
     BV = B * Vt
     dev = alpha_t.device

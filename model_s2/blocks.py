@@ -9,6 +9,15 @@
 #   rcomp_k, rcomp_v CompressionResBlock(64) on the target keys / values (reverse summaries; bidir only)
 # Target stream x is packed [T, C] (per view: 4 registers + foreground tokens in Morton slot order);
 # scene stream rec is [BV, S, C] in raster view-major order.
+#
+# structure (config model.stage2.structure; user 09-28, prototypes in tools_s2/s2_fgdense_whatif.py):
+#   current   the modules above: compressed + selected (window) target->scene, filtered reverse attention
+#   fg_dense  scene stream = foreground scene tokens only, packed [Ts, C] (model_s2/fg_scene.py); both directions
+#             dense attention inside each target view (FA3 block-diagonal): no compression, no windows, no gate
+#   fg_dual   fg_dense's foreground-global branch + a geometric-window branch (flex, windows cut to the foreground
+#             scene tokens) in both directions, gated sums: gate(x) forward, rgate(rec) reverse (bidir only)
+# New modules per structure: current inj_x, inj_rec, gate, comp_k, comp_v (+ rcomp_k, rcomp_v bidir);
+# fg_dense inj_x, inj_rec; fg_dual inj_x, inj_rec, gate (+ rgate bidir).
 
 from dataclasses import dataclass, field
 
@@ -59,7 +68,7 @@ class S2Ctx:
     fwd_mask: MaskTable             # [BV, Lq, S_pad]
     rev_mask: MaskTable             # [BV, S_pad, Kr]
     x_prior: torch.Tensor           # [T, C] frozen stage-1 final target tokens (packed)
-    rec_prior: torch.Tensor         # [BV, S, C] frozen stage-1 scene tokens after block 10
+    rec_prior: torch.Tensor         # [BV, S, C] frozen stage-1 scene tokens after block 10 ([Ts, C] packed for fg_*)
     scene_g: int
     n_views: int
     scene_block: int
@@ -67,6 +76,10 @@ class S2Ctx:
     dense_backend: str = "fa3"
     masked_backend: str = "sdpa"
     cache: dict = field(default_factory=dict)
+    structure: str = "current"
+    s_seqlens: list = None          # fg_*: kept scene tokens per target view
+    scene_idx: torch.Tensor = None  # fg_*: [Ts] rows of rec_rep.reshape(BV * S, C) kept
+    win: dict = None                # fg_dual: window tables and gather indices (model_s2/fg_scene.build_fg_windows)
 
 
 def _heads(t, n_heads):
@@ -165,24 +178,94 @@ def scene_to_target(attn, rcomp_k, rcomp_v, rn, xn, ctx):
     return attn.attn_fc_dropout(attn.proj(o.flatten(-2)))
 
 
+# ------------------------------------------------------------------------------------ fg_dense / fg_dual
+def _qkv(attn, qin, kvin):
+    H = attn.num_heads
+    return (attn.q_norm(_heads(attn.q_proj(qin), H)), attn.k_norm(_heads(attn.k_proj(kvin), H)),
+            _heads(attn.v_proj(kvin), H))
+
+
+def fg_global(q, k, v, q_seqlens, kv_seqlens, ctx, direction):
+    """dense attention of each target view's queries to that view's keys only (packed segments, FA3).
+    direction ('t2s' / 's2t') only labels the call for instrumentation."""
+    return attend_blockdiag(q, k, v, q_seqlens, kv_seqlens, ctx.dense_backend)
+
+
+def _scatter_pad(x, src, dst, rows):
+    """packed rows x [N, H, D] (optionally the subset x[src]) written into a zeros [rows, H, D] at the unique
+    destinations dst.  Not x_zero_row[gather_index]: its backward accumulates the gradient of every pad slot into the
+    one shared zero row (atomics on one address; 09-28 profile job 6910150: 149 ms vs 2.1 ms per scene-side call,
+    69 % of a fg_dual training step); index_copy's backward is a plain gather."""
+    if src is not None:
+        x = torch.index_select(x, 0, src)
+    return x.new_zeros(rows, *x.shape[1:]).index_copy(0, dst, x)
+
+
+def fg_window(q, k, v, win, key, ctx, direction):
+    """geometric-window branch: packed q [Nq, H, D] / k, v [Nk, H, D] written into the window table's padded
+    layout [BV, Lq] / [BV, Lk] (pad slots zero), per-token masked attention, the packed query rows selected back.
+    win / key ('f' forward, 'r' reverse): model_s2/fg_scene.build_fg_windows."""
+    BV, Lq, Lk = win["BV"], win[key + "_Lq"], win[key + "_Lk"]
+    qp = _scatter_pad(q, None, win[key + "_q_dst"], BV * Lq).view(BV, Lq, *q.shape[1:])
+    kp = _scatter_pad(k, win[key + "_kv_src"], win[key + "_kv_dst"], BV * Lk).view(BV, Lk, *k.shape[1:])
+    vp = _scatter_pad(v, win[key + "_kv_src"], win[key + "_kv_dst"], BV * Lk).view(BV, Lk, *v.shape[1:])
+    o = attend_masked(qp, kp, vp, win[key + "_mask"], ctx.masked_backend)
+    return torch.index_select(o.reshape(BV * Lq, *o.shape[2:]), 0, win[key + "_out"])
+
+
+def fg_cross(attn, gate, qin, kvin, q_seq, kv_seq, win, key, ctx, direction):
+    """fg_dense: the foreground-global branch; fg_dual: + the window branch, sigmoid-gated per channel"""
+    q, k, v = _qkv(attn, qin, kvin)
+    o = fg_global(q, k, v, q_seq, kv_seq, ctx, direction).flatten(-2)
+    if gate is not None:
+        o_w = fg_window(q, k, v, win, key, ctx, direction).flatten(-2)
+        g_g, g_w = torch.sigmoid(gate(qin)).chunk(2, dim=-1)
+        o = g_g * o + g_w * o_w
+    return attn.attn_fc_dropout(attn.proj(o))
+
+
+NEW_MODULES = {("bidir", "current"): ("inj_x", "inj_rec", "gate", "comp_k", "comp_v", "rcomp_k", "rcomp_v"),
+               ("bidir", "fg_dense"): ("inj_x", "inj_rec"),
+               ("bidir", "fg_dual"): ("inj_x", "inj_rec", "gate", "rgate"),
+               ("final", "current"): ("inj_x", "inj_rec", "gate", "comp_k", "comp_v"),
+               ("final", "fg_dense"): ("inj_x", "inj_rec"),
+               ("final", "fg_dual"): ("inj_x", "inj_rec", "gate")}
+
+
+def _make_new(block, kind, structure, hidden_dim, num_heads):
+    if (kind, structure) not in NEW_MODULES:
+        raise ValueError(f"unknown stage-2 structure {structure!r}")
+    block.structure = structure
+    block._new = NEW_MODULES[(kind, structure)]
+    d = hidden_dim // num_heads
+    for name in block._new:
+        if name in ("inj_x", "inj_rec"):
+            setattr(block, name, nn.Linear(hidden_dim, hidden_dim, bias=False))
+        elif name in ("gate", "rgate"):
+            setattr(block, name, nn.Linear(hidden_dim, 2 * hidden_dim, bias=False))
+        else:
+            setattr(block, name, CompressionResBlock(d))
+
+
+def _init_new(block):
+    for name in block._new:
+        m = getattr(block, name)
+        if isinstance(m, CompressionResBlock):
+            init_compression(m)
+        else:
+            init_new_linear(m)
+
+
 class S2BidirBlock(BidirectionalCrossAttentionBlock):
-    def __init__(self, hidden_dim, num_heads):
+    def __init__(self, hidden_dim, num_heads, structure="current"):
         super().__init__(hidden_dim=hidden_dim, num_heads=num_heads)
-        d = hidden_dim // num_heads
-        self.inj_x = nn.Linear(hidden_dim, hidden_dim, bias=False)
-        self.inj_rec = nn.Linear(hidden_dim, hidden_dim, bias=False)
-        self.gate = nn.Linear(hidden_dim, 2 * hidden_dim, bias=False)
-        self.comp_k, self.comp_v = CompressionResBlock(d), CompressionResBlock(d)
-        self.rcomp_k, self.rcomp_v = CompressionResBlock(d), CompressionResBlock(d)
+        _make_new(self, "bidir", structure, hidden_dim, num_heads)
 
     def new_module_names(self):
-        return ("inj_x", "inj_rec", "gate", "comp_k", "comp_v", "rcomp_k", "rcomp_v")
+        return self._new
 
     def init_new(self):
-        for m in (self.inj_x, self.inj_rec, self.gate):
-            init_new_linear(m)
-        for c in (self.comp_k, self.comp_v, self.rcomp_k, self.rcomp_v):
-            init_compression(c)
+        _init_new(self)
 
     def forward(self, x, rec, ctx):
         x = x + self.inj_x(ctx.x_prior)
@@ -190,8 +273,15 @@ class S2BidirBlock(BidirectionalCrossAttentionBlock):
         x = x + self_attention_packed(self.self_attn, self.norm1_x(x), ctx)
         xn = self.norm2_x(x)
         rn = self.norm1_rec(rec)
-        dx = target_to_scene(self.cross_attn_x, self.gate, self.comp_k, self.comp_v, xn, rn, ctx)
-        drec = scene_to_target(self.cross_attn_rec, self.rcomp_k, self.rcomp_v, rn, xn, ctx)
+        if self.structure == "current":
+            dx = target_to_scene(self.cross_attn_x, self.gate, self.comp_k, self.comp_v, xn, rn, ctx)
+            drec = scene_to_target(self.cross_attn_rec, self.rcomp_k, self.rcomp_v, rn, xn, ctx)
+        else:
+            dual = self.structure == "fg_dual"
+            dx = fg_cross(self.cross_attn_x, self.gate if dual else None, xn, rn, ctx.q_seqlens, ctx.s_seqlens,
+                          ctx.win, "f", ctx, "t2s")
+            drec = fg_cross(self.cross_attn_rec, self.rgate if dual else None, rn, xn, ctx.s_seqlens, ctx.q_seqlens,
+                            ctx.win, "r", ctx, "s2t")
         x = x + dx
         rec = rec + drec
         x = x + self.mlp_x(self.norm3_x(x))
@@ -200,22 +290,15 @@ class S2BidirBlock(BidirectionalCrossAttentionBlock):
 
 
 class S2FinalBlock(CrossAttentionBlock):
-    def __init__(self, hidden_dim, num_heads):
+    def __init__(self, hidden_dim, num_heads, structure="current"):
         super().__init__(hidden_dim=hidden_dim, num_heads=num_heads)
-        d = hidden_dim // num_heads
-        self.inj_x = nn.Linear(hidden_dim, hidden_dim, bias=False)
-        self.inj_rec = nn.Linear(hidden_dim, hidden_dim, bias=False)
-        self.gate = nn.Linear(hidden_dim, 2 * hidden_dim, bias=False)
-        self.comp_k, self.comp_v = CompressionResBlock(d), CompressionResBlock(d)
+        _make_new(self, "final", structure, hidden_dim, num_heads)
 
     def new_module_names(self):
-        return ("inj_x", "inj_rec", "gate", "comp_k", "comp_v")
+        return self._new
 
     def init_new(self):
-        for m in (self.inj_x, self.inj_rec, self.gate):
-            init_new_linear(m)
-        for c in (self.comp_k, self.comp_v):
-            init_compression(c)
+        _init_new(self)
 
     def forward(self, x, rec, ctx):
         x = x + self.inj_x(ctx.x_prior)
@@ -223,6 +306,10 @@ class S2FinalBlock(CrossAttentionBlock):
         x = x + self_attention_packed(self.self_attn, self.norm1(x), ctx)
         xn = self.norm2(x)
         rn = self.norm2_kv(rec)
-        x = x + target_to_scene(self.cross_attn, self.gate, self.comp_k, self.comp_v, xn, rn, ctx)
+        if self.structure == "current":
+            x = x + target_to_scene(self.cross_attn, self.gate, self.comp_k, self.comp_v, xn, rn, ctx)
+        else:
+            x = x + fg_cross(self.cross_attn, self.gate if self.structure == "fg_dual" else None, xn, rn,
+                             ctx.q_seqlens, ctx.s_seqlens, ctx.win, "f", ctx, "t2s")
         x = x + self.mlp(self.norm_ffn(x))
         return x

@@ -1,76 +1,114 @@
 # Largenvs uni3t 两阶段稀疏细化(第二阶段)
 
-> **一句话现状**:第一阶段固定用 uni3t 模型 `PLN2uni3t_all287k_b32t6_fp32lr35_wsd60k_a10k` ckpt_70000,冻结不训。第二阶段是只处理前景的稀疏细化器(LSRM 式)。代码已通过 G0–G8 关口,但实测**第二阶段渲染器比第一阶段渲染器还慢**(训练形状 1.8 倍),达不到"必须比第一阶段快很多"的要求。所以正式训练一次也没跑,**下一步是先选定新结构**(第 8.1 节)。
+> **一句话现状(2026-10-13)**:第二阶段在 Isambard-AI(GH200)上实现并训练了四个块 8 实验。数字上最大的提升(有位姿 PSNR 25.21 → 29.70 dB)几乎全部来自"新视角的真值目标掩码"——这是部署时拿不到的输入;把它去掉之后,第二阶段训到 10k 步只让 LPIPS 好 0.0025、PSNR 不涨,画面看不出变化。审计表明第二阶段渲染器(r1)确实在训练,但从和第一阶段相同的输入里学到的东西很少。下一步先弄清"为什么学得少",再决定块 4 的两个实验(第 9 节)。
 
-- 代码仓:本仓 = 原机器 `~/code/RnG_lagernvs_stage2` 的 `stage2` 分支,推到 GitHub 后是 `main` 分支。
+- 代码仓:本仓 = 原机器 `~/code/RnG_lagernvs_stage2` 的 `stage2` 分支,GitHub 上是 `main` 分支。
 - 基底:`RnG_lagernvs` 仓 uni3t 分支 0abb1d7 的快照(本仓提交 79798f8)。第一阶段的模型代码(`model/`、`models/`、`vggt/`)一行没改,冻结的第一阶段就是用它构建的。
-- 第一阶段权重:`szlgallen/RAE_backup_checkpoints` 仓内 `moe_experiments/checkpoints/PLN2uni3t_all287k_b32t6_fp32lr35_wsd60k_a10k/ckpt_0000000000070000.pt`(第 3.1 节)。
-- 写于 2026-09-27。原机器 GPU 排满、难以调试,之后的实验都换到新机器上做。
+- 第一阶段权重:HF `szlgallen/RAE_backup_checkpoints` 仓内 `moe_experiments/checkpoints/PLN2uni3t_all287k_b32t6_fp32lr35_wsd60k_a10k/ckpt_0000000000070000.pt`(第 4.1 节)。
+- 机器:09-27 之前在原机器(H200);09-27 至 09-29 的全部实验在 Isambard-AI(BriCS,每节点 4 × GH200,aarch64,Slurm)。**Isambard 于 2026-10-15 回收**;按 10-13 的决定,只备份代码和本 README(实验数字与结论都写在这里),第二阶段的 checkpoint 不备份(第 11 节)。
+- 另一条工作线:**第一阶段加轨迹一致性损失**(09-29 至 10-04,在原机器上做),记录原样保留在第 12 节。
+- 写于 2026-09-27,2026-10-13 全面更新(第 0–11 节;第 12 节来自 10-04 的提交)。
+- 本文的约定:"块 8 / 块 4"指第二阶段目标图块的边长(8×8 / 4×4 像素);r0 = 第一阶段渲染器,r1 = 第二阶段渲染器;实验一律写完整实验名。
 
 ---
 
 ## 目录
 
-0. 新机器上手顺序
-1. 仓库结构
-2. 环境
-3. 权重与数据
-4. 迁移时要改的路径
-5. 怎么测试
-6. 怎么运行
-7. 已完成的内容与结果
-8. 还需要继续测试的内容
-9. 之前定下、后续要做的消融 / 备选 / 暂缓
+0. 现状、结论与下一步(先读这一节)
+1. 换机器上手顺序
+2. 仓库结构
+3. 环境
+4. 权重与数据
+5. 换机器时要改的路径
+6. 怎么测试、怎么运行
+7. 实验记录(每个实验:为什么做 / 做了什么 / 结果)
+8. 遇到的问题与处理
+9. 后续规划
 10. 已知问题与注意事项
-11. 用到的 checkpoints 一览
+11. 备份状态与 checkpoints 一览
 12. 第一阶段加轨迹一致性损失(2026-09-29 起)
 
 ---
 
-## 0. 新机器上手顺序
+## 0. 现状、结论与下一步
 
-1. `git clone git@github.com:gallenszl/Largenvs_ui3t_twostage.git`
-2. 准备环境(第 2 节),关键是 torch 2.7 + xformers + flash_attn_3(需要 Hopper GPU)。
-3. 从 HF 下载第一阶段权重,并核对 sha256(第 3.1 节)。这是新机器上唯一缺的东西。
-4. 确认其余权重和数据都在(第 3.2、3.3 节,新机器上已有)。
-5. 按第 4 节改路径,另建一个放 W&B key 的 yaml。
-6. 依次跑 CPU 单测、GPU 单测、冒烟(第 5 节)。
-7. 先定第二阶段的新结构(第 8.1 节),再开训练。旧结构的训练脚本和配置都能直接跑,但按第 7.4 节的实测,它不满足速度要求。
+### 0.1 训练过的实验(全部块 8,配方相同,第 6.5 节)
+
+| 实验名 | 结构 | 哪些目标图块被重画 | 掩码输入通道 | 状态 | 有位姿 PSNR / LPIPS,第 0 步 → 最后验证点 | W&B run |
+|---|---|---|---|---|---|---|
+| `S2P8fgdense_uni3t70k_b32t6_lr35_a21k26k` | fg_dense | 含真值前景像素的 8×8 图块 | 真值目标掩码 | 训满 26k(作业 6910007,4 卡 14.2 小时) | 25.21 / 0.0925 → 29.70 / 0.0738(26k) | `e1h0j0y7` |
+| `S2P8fgdual_uni3t70k_b32t6_lr35_a21k26k` | fg_dual | 同上 | 同上 | 09-28 用户叫停于约 10.1k(作业 6912794) | → 29.22 / 0.0810(10k) | `2bk04yq4` |
+| `S2P8fgdense_s1sel1_s1mask_uni3t70k_b32t6_lr35_a21k26k` | fg_dense | 第一阶段渲染图里含非白像素的 8×8 图块,外扩 1 圈 | 第一阶段渲染图的非白像素掩码 | **无效果**,09-29 用户叫停于约 11.8k(作业 6923274) | → 25.21 / 0.0900(10k) | `jb8wrpq1` |
+| `S2P8fgdense_s1sel1_nomask_uni3t70k_b32t6_lr35_a21k26k` | fg_dense | 同上 | 恒为 0(不给掩码信息) | **无效果**,09-29 用户叫停于约 11.8k(作业 6923275) | → 25.21 / 0.0900(10k) | `o0a1q0r9` |
+
+表注:对照都是各自的第 0 步,它逐位等于第一阶段 `PLN2uni3t_all287k_b32t6_fp32lr35_wsd60k_a10k` ckpt_70000(G9 核对,第 6.6 节)。数据是 GSO v1 subset64(64 个条目,每个 4 张输入 → 10 张目标)。W&B 项目 `szlgallen-peking-university/PLN2_lagernvs`。fg_dual 另有一条旧代码 run `74pqzjqw`(作业 6910008,在 3160 步停掉,作废,原因见第 8 节第 5 条)。"非白像素"= 某个颜色通道比白色低 0.1 以上。
+
+### 0.2 主要结论(依据从硬到软)
+
+1. **不给新视角真值信息时,第二阶段(块 8)基本没有提升。** 两条线、两种相机设定、2k–10k 五个验证点走势一致;10k 时 LPIPS 比第一阶段低 0.0025(逐物体配对 95% 区间 [−0.0027, −0.0022]),未过 0.003 的信号线;PSNR −0.008 dB;画面平均只变 0.5 个灰度级。给不给第一阶段的掩码通道,逐物体没有差别。(第 7.9、7.10 节)
+2. **`S2P8fgdense_uni3t70k_b32t6_lr35_a21k26k` 的大提升主要来自真值目标掩码。** 三条独立证据:只给第一阶段贴同一张真值 alpha 就 +2.1 dB;提升最大的恰是第一阶段把物体画出界的视角(+7.9 dB),而这些视角画面上反而多出沿 8×8 网格的阶梯色块;审计显示它进颜色头那层的残差是第一阶段 token 的 46%,不用真值的两条只有 5%。(第 7.8、7.11 节)
+3. **r1 在训练,但学到的很少。** 没有被跳过的更新步,参数移动速度与真值掩码版相当;差别在学到的修正量小一个数量级。原因(没东西可学 / 学得太慢)现有数据分不开,第 9.1 节给了能分开的实验。(第 7.11 节)
+4. **速度上,fg_dense 满足"r1 比 r0 便宜"。** GH200 上渲 10 张:r0 纯 GPU 71.9 ms;fg_dense 的 r1 24.5 ms(真值图块)/ 26.4 ms(第一阶段渲染图选的图块,图块多 40%)。原结构 r1 要 121.1 ms,不满足。(第 7.3、7.9 节)
+5. **fg_dual 有没有用没有答案。** 到 10k 它与 fg_dense 同步数的差都在噪声内,两条线没分开就被叫停了。(第 7.7 节)
+
+### 0.3 下一步(第 9 节)
+
+1. 先弄清"r1 为什么学得少":过拟合测试(1 卡约 2 小时),必要时再做学习率探针。
+2. 块 4 的两个实验(块 4 主方案初始化;块 4"开局等于第一阶段"初始化):改动清单已列出,有 4 个点待用户拍板,用户 09-29 要求先不动手。
+3. 续训时恢复数据位置(块 4 很可能超过 24 小时,必须先修)。
+
+### 0.4 备份(第 11 节)
+
+代码和本 README 推到 GitHub;第一阶段权重在 HF;训练曲线在 W&B;对照网页在 claude.ai。第二阶段 checkpoint、验证渲染图、逐物体指标文件、作业日志都留在 Isambard,10-15 回收后丢失;关键数字已抄进本 README。
 
 ---
 
-## 1. 仓库结构
+## 1. 换机器上手顺序
 
-第二阶段新增或改动的文件(相对快照 79798f8,共 53 个文件):
+1. `git clone git@github.com:gallenszl/Largenvs_ui3t_twostage.git`
+2. 准备环境(第 3 节):torch 2.7 + xformers 0.0.30 + flash_attn_3(需要 Hopper GPU)。
+3. 从 HF 下载第一阶段权重并核对 sha256(第 4.1 节)。
+4. 准备其余权重和数据(第 4.2、4.3 节)。全量评测需要的 GSO v2(1030 个物体)在 Isambard 上没有,要另外准备。
+5. 按第 5 节改路径,另建一个放 W&B key 的 yaml。
+6. 依次跑 CPU 单测、GPU 单测、冒烟(第 6.1–6.3 节)。
+7. 按第 9 节的顺序继续。
+
+---
+
+## 2. 仓库结构
+
+第二阶段新增或改动的文件(相对快照 79798f8):
 
 | 路径 | 内容 |
 |---|---|
-| `model_s2/stage1_runner.py` | 冻结的第一阶段。载入并核验 ckpt:步数必须等于 `stage1_step`,缺失或多余的键只允许 `loss_computer.*`。`pass1` = VGGT + 第一阶段渲染器 + 三个头;`pass2` = 把 4 个输入相机当目标再渲一遍,得到输入图深度 |
-| `model_s2/geometry.py` | 投影、token 布局、逐 token 的前向 / 反向屏蔽表(可见性、几何窗口)。屏蔽表就是"每个 query 允许看哪些 key"的布尔表 |
-| `model_s2/masked_attention.py` | 带屏蔽表的注意力后端:`flex`(FlexAttention,两组现在都用它)、`sdpa`(PyTorch 高效内核,作参照和保底)、`ref`(CPU fp64 参照,测试用)。另有块对角稠密注意力 `fa3` |
-| `model_s2/blocks.py` | 第二阶段的块:注入、压缩(块摘要 + ResBlock)、几何窗口、门控、按可见性过滤的反向注意力 |
-| `model_s2/renderer_s2.py` | 第二阶段渲染器,12 块,逐块重算 |
-| `model_s2/heads_s2.py` | 把残差按层加回第一阶段 token(T~ = T1 + Lin_m(t2),m = 2/5/8/11),再过颜色头和点图头。块 4 用改过网格的 DPT |
-| `model_s2/stage2_wrapper.py` | `Stage2LagerNVS`:整次前向、损失、只存可训练参数 |
-| `inference_s2.py` | 评测入口。一次前向同时写第二阶段结果 `<dir>` 和第一阶段结果 `<dir>_s1`,两者天然按物体配对 |
-| `configs/S2P8_uni3t70k_b32t6_lr35_a21k26k.yaml` | 块 8 组:第二阶段目标 token 仍是 8×8 像素一块 |
-| `configs/S2P4_uni3t70k_b32t6_lr35_a21k26k.yaml` | 块 4 组:前景目标 token 细到 4×4 像素 |
-| `tools_s2/` | 工具和诊断脚本(第 6.4 节) |
-| `scripts_s2/` | Slurm 作业脚本与 5 分钟守护 `s2_watch.sh` |
-| `tests/test_s2_*.py` | 单测(第 5 节) |
-| `train.py`、`utils/training_utils.py` | 验证时依次跑有位姿和无位姿、第 0 步先验证、只存可训练参数、额外存点、自动剪存、续训出错直接报错停下(不再静默从第 0 步重来) |
-| `data/dataset_gso_ours.py` | 验证集可以单独关掉平面内旋转 |
-| `data/gso_subset4.txt` | 冒烟用的 4 个物体 |
-| `docs/half_pixel_pointmap_bug.md`、`tools_s2/check_pointmap_on_ray.py` | 第一阶段点图半像素 bug 的说明与验收脚本(第 10 节) |
-| `docs/README_upstream_LVSM.md` | 原 README(上游 LVSM),从根目录挪到这里 |
-
-两组配置只有 5 行不同:`target_patch` 8 / 4、`target_radius` 2 / 3、`pad_bucket` 128 / 256,以及 `exp_name`。
+| `model_s2/stage1_runner.py` | 冻结的第一阶段。载入并核验 ckpt:步数必须等于 `stage1_step`,缺失或多余的键只允许 `loss_computer.*`。`pass1` = VGGT + 第一阶段渲染器 + 三个头(含第一阶段对目标图的渲染 `render`);`pass2` = 把 4 个输入相机当目标再渲一遍,得到输入图深度 |
+| `model_s2/geometry.py` | 投影、token 布局、逐 token 的前向 / 反向屏蔽表。`build_layout` 用一张像素掩码决定重画哪些目标图块(图块内有一个像素为 1 就重画)。09-28 新增 `stage1_painted`(第一阶段渲染图的非白像素)和 `tiles_from_painted`(含非白像素的图块,外扩 k 圈) |
+| `model_s2/fg_scene.py`(新) | fg 结构的场景侧:输入图真值 alpha 池化到 37×37 场景网格、外扩 1 个 token,只保留前景场景 token;fg_dual 的几何窗口表 |
+| `model_s2/masked_attention.py` | 带屏蔽表的注意力后端:`flex`(FlexAttention)、`sdpa`、`ref`(CPU fp64 参照);块对角稠密注意力 `fa3`(xformers + FA3) |
+| `model_s2/blocks.py` | 第二阶段的块,三种结构(`model.stage2.structure`):`current` = 注入 + 压缩 + 几何窗口 + 门控 + 按可见性过滤的反向注意力;`fg_dense` = 场景侧只留前景 token,两个方向都在每张目标图内做稠密注意力,新模块只有注入层 `inj_x` / `inj_rec`;`fg_dual` = fg_dense + 两个方向的几何窗口分支,门控相加(`gate` / `rgate`) |
+| `model_s2/renderer_s2.py` | 第二阶段渲染器,12 块,逐块重算。目标 token 嵌入是 7 通道(6 个射线 + 1 个掩码) |
+| `model_s2/heads_s2.py` | 把残差按层加回第一阶段 token(T~ = T1 + Lin_m(t2),m = 2/5/8/11),再过颜色头和点图头。块 4 用改过网格的 DPT 和新的颜色头 |
+| `model_s2/stage2_wrapper.py` | `Stage2LagerNVS`:整次前向、损失、只存可训练参数。09-28 新增配置键 `structure`、`target_select`(`gt` / `stage1`)、`target_select_dilate`、`target_select_tau`、`mask_input`(`gt` / `stage1` / `zero`);方法 `make_ctx`(选图块 + 布局 + 场景子集,训练与测速共用同一段代码)和 `target_selection`;只有 current / fg_dual 才跑"再渲一遍 + 建表"。监控量 `s2_fg_tokens`(每视角重画图块数)、`s2_sel_gt_miss`(真值前景落在重画区域外的比例,只记录,模型看不到) |
+| `inference_s2.py` | 评测入口,一次前向同时写第二阶段结果 `<dir>` 和第一阶段结果 `<dir>_s1`。新增 `inference.metrics_autocast`(false = 指标按 fp32 算,和训练内验证一致) |
+| `setup.py` | 新增环境变量 `CUDNN_BENCHMARK`(=0 时关掉 cudnn.benchmark,诊断用) |
+| `configs/S2P8_…`、`configs/S2P4_…` | 原结构的块 8 / 块 4 组(路径已改成 Isambard) |
+| `configs/S2P8fgdense_uni3t70k_b32t6_lr35_a21k26k.yaml` 等 4 个 | 第 0.1 节的四个实验。fg_dense / fg_dual 配置 = `S2P8_…` + `structure` + `exp_name` + `checkpoint_every: 1000`;两个 s1sel 配置 = fg_dense 配置 + `target_select: stage1`、`target_select_dilate: 1`、`target_select_tau: 0.1`、`mask_input: stage1` 或 `zero` |
+| `train.py`、`utils/training_utils.py` | 验证时依次跑有位姿和无位姿、第 0 步先验证、只存可训练参数、自动剪存、续训出错直接停下 |
+| `data/dataset_gso_ours.py`、`data/gso_subset4.txt` | 验证集可单独关掉平面内旋转;冒烟用的 4 个物体 |
+| `tools_s2/` | 工具和诊断脚本(第 6.7 节) |
+| `scripts_s2/` | Isambard 上的 Slurm 脚本(`--nodes=1 --gpus=N`,日志写到仓内 `slurm_logs/`,该目录不进 git)、公共环境 `s2_env.sh`、5 分钟守护 `s2_watch.sh` |
+| `tests/test_s2_*.py` | 单测(第 6.1、6.2 节) |
+| `docs/half_pixel_pointmap_bug.md`、`tools_s2/check_pointmap_on_ray.py` | 第一阶段点图半像素 bug 的说明与验收脚本 |
+| `docs/README_upstream_LVSM.md` | 原 README(上游 LVSM) |
+| `model/track_consistency.py`、`model/loss.py`(`training.weight_consistency`,缺省 0 时已有配置逐位不变)、`model/lagernvs_wrapper.py`、`tests/test_track_consistency.py`、`tools/track_consistency_probe.py`、`tools/uni3t_smoke_gates.py`、`tools/uni3t_task_grad_decomp.py`、`tools_s2/uni3t_eval_compare.py`、`scripts_s2/uni3t_train_4gpu.sbatch`、`scripts_s2/uni3t_fulleval_gso.sbatch`、`scripts_s2/track_probe_cpu.sbatch`、`docs/probe_results/` | 第一阶段轨迹一致性实验(第 12 节)。这几个脚本是按原机器集群写的(H200、`/home/z50057756/…` 路径) |
 
 ---
 
-## 2. 环境
+## 3. 环境
 
-原机器上的环境名是 `rng-fa3`。训练、测试、评测都用它。
+**Isambard 上用的环境** `rng-fa3-a64`:原机器 `rng-fa3` 在 aarch64 上的复制品,版本与下表一致(torch 2.7.0+cu128、xformers 0.0.30、flash_attn_3 3.0.0、pytorch-triton 3.3.0、python 3.10、timm 1.0.25)。激活脚本 `/projects/u6ga/zhelun/envs/rng-fa3-a64.env.sh`;安装记录 `/home/u6ga/zhelun.u6ga/rng_fa3_a64_build/INSTALL_REPORT.md`(在 Isambard 上,回收后丢失)。
+
+**原机器的环境** `rng-fa3`:
 
 | 包 | 版本 |
 |---|---|
@@ -78,54 +116,40 @@
 | torch / torchvision | 2.7.0+cu128 / 0.22.0+cu128 |
 | CUDA / cuDNN | 12.8 / 9.7.1 |
 | xformers | 0.0.30 |
-| flash_attn_3 | 3.0.0(Hopper 版,源码编译;xformers 的 flash3 算子要用它) |
+| flash_attn_3 | 3.0.0(Hopper 版,源码编译) |
 | triton | 3.3.0(FlexAttention 编译用) |
 | numpy / Pillow / opencv-python-headless | 1.26.4 / 10.0.1 / 4.7.0.72 |
 | lpips / timm / transformers | 0.1.4 / 1.0.25 / 4.48.0 |
 | omegaconf / easydict / einops / PyYAML | 2.1.1 / 1.13 / 0.8.2 / 6.0.3 |
 | scipy / scikit-image / wandb | 1.15.3 / 0.23.2 / 0.18.7 |
 
-- **装环境**:仓库里已有安装材料,新机器上若已有同版环境就不用装。
-  - `requirements-fa3.txt`:主依赖,已锁版本,含 cu128 的 index。
-  - `requirements-fa3-current-lock.txt`:整个环境的完整锁定清单。
-  - `scripts/install_rng_fa3_env_example.sh`:在另一台机器上从零装出同版环境;FA3 从 Dao-AILab/flash-attention 的 `hopper/` 目录按 commit `2e53092aa70fccd3f04013a01a52dc20c619e62b` 编译。
-  - `scripts/setup_rng_fa3_env.sh`:同一流程写死了 `/scratch/zs3325` 路径的版本。
-- **硬件**:只在 H200(sm_90)上测过。训练 4 卡,测试、冒烟、测速 1 卡。FA3 只能在 Hopper 上跑。
-- **备用环境** `rng-v3moe-t211-te218`(torch 2.11)没用上,不需要。
-- `scripts_s2/s2_env.sh` 设置的环境变量:
-  - `PYTHONNOUSERSITE=1`:原机器 `~/.local` 里的包会遮蔽环境里的包。
-  - `TORCH_HOME`:VGGT-1B 和 VGG 权重的缓存目录(第 3.2 节)。
-  - `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`:形状多变时减少显存碎片。
-  - `TORCHINDUCTOR_CACHE_DIR`、`TRITON_CACHE_DIR`:放在节点本地 `/tmp`,不要放共享盘。FlexAttention 的编译缓存写在这里。
-  - `OMP_NUM_THREADS=4`。
+- **装环境**:`requirements-fa3.txt`(主依赖,已锁版本)、`requirements-fa3-current-lock.txt`(完整锁定清单)、`scripts/install_rng_fa3_env_example.sh`(从零装;FA3 从 Dao-AILab/flash-attention 的 `hopper/` 目录按 commit `2e53092aa70fccd3f04013a01a52dc20c619e62b` 编译)。
+- **硬件**:原机器 H200;Isambard GH200(每卡约 96 GB 可见显存)。训练 4 卡,测试、冒烟、测速 1 卡。FA3 只能在 Hopper 上跑。同一测速(G8)在 GH200 上比 H200 慢 3–7%(第 7.3 节)。
+- `scripts_s2/s2_env.sh` 做的事:激活环境;`PYTHONNOUSERSITE=1`;`OMP_NUM_THREADS=4`;`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`;`S2_ROOT=/scratch/u6ga/zhelun.u6ga/S2_experiments`(ckpt、冒烟、测速输出,不放 `$HOME`);`WANDB_DIR=$S2_ROOT/wandb`;FlexAttention / Inductor 的编译缓存和 `TMPDIR` 放节点本地盘(`/tmp`、`$LOCALDIR`、`$SCRATCH/tmp` 中第一个可写的);`REPO` 设为仓库路径并 `cd` 进去;打印作业号、节点、git 提交和 GPU 信息。
 
 ---
 
-## 3. 权重与数据
+## 4. 权重与数据
 
-### 3.1 第一阶段权重(新机器上只缺这个)
+### 4.1 第一阶段权重
 
 **是什么**:uni3t 三任务模型,同时做新视角合成、输入图位姿、目标图点图。训练数据是 all287k。前 60k 步按恒定学习率 3.5e-5 训练(即 `PLN2uni3t_all287k_b32t6_fp32lr35_const` ckpt_60000),之后按 1−√ 进度退火,60k→70k 步降到 0。本文件是退火终点。
 
 **在哪**:
 
-- HF:<https://huggingface.co/szlgallen/RAE_backup_checkpoints/blob/main/moe_experiments/checkpoints/PLN2uni3t_all287k_b32t6_fp32lr35_wsd60k_a10k/ckpt_0000000000070000.pt>
-- 同一目录还放了 `README.md`、`SHA256SUMS.txt`,以及这次训练实际用的 `config.yaml`。
-- 原机器:`/mnt/data-alpha-sg-01/team-camera/home/z50057756/moe_experiments/checkpoints/PLN2uni3t_all287k_b32t6_fp32lr35_wsd60k_a10k/ckpt_0000000000070000.pt`
+- HF:<https://huggingface.co/szlgallen/RAE_backup_checkpoints/blob/main/moe_experiments/checkpoints/PLN2uni3t_all287k_b32t6_fp32lr35_wsd60k_a10k/ckpt_0000000000070000.pt>(同目录有 `README.md`、`SHA256SUMS.txt`、训练用的 `config.yaml`)
+- Isambard:`/projects/u6ga/zhelun/RnG_weights/stage1/moe_experiments/checkpoints/PLN2uni3t_all287k_b32t6_fp32lr35_wsd60k_a10k/ckpt_0000000000070000.pt`
 
 | 项 | 值 |
 |---|---|
 | 大小 | 16,755,969,541 字节(15.6 GiB) |
 | sha256 | `00cb27e01c359468037cd821cea6b596b339db87bc7eebbe5ae81437d47893f4` |
 | 顶层键 | `model`、`optimizer`、`lr_scheduler`、`fwdbwd_pass_step` = 70000、`param_update_step` = 70000 |
-| `model` | 1734 个 fp32 张量,共 15.07 亿个元素。其中含 66 个感知损失 VGG 张量(`loss_computer.*`) |
-
-表注:上传后已用 HF 记录的 LFS sha256 和字节数,对照本地 `sha256sum` 核验,两者一致(2026-09-27)。文件里保留了优化器状态,所以也能接着训第一阶段。
+| `model` | 1734 个 fp32 张量,共 15.07 亿个元素,其中含 66 个感知损失 VGG 张量(`loss_computer.*`) |
 
 **下载与核对**:
 
 ```bash
-export HF_HUB_ENABLE_HF_TRANSFER=1     # 可选,装了 hf_transfer 时更快
 hf download szlgallen/RAE_backup_checkpoints \
   moe_experiments/checkpoints/PLN2uni3t_all287k_b32t6_fp32lr35_wsd60k_a10k/ckpt_0000000000070000.pt \
   --local-dir /path/to/ckpts
@@ -133,401 +157,623 @@ sha256sum /path/to/ckpts/moe_experiments/checkpoints/PLN2uni3t_all287k_b32t6_fp3
 # 应为 00cb27e01c359468037cd821cea6b596b339db87bc7eebbe5ae81437d47893f4
 ```
 
-**怎么用**:
+**怎么用**:第二阶段配置里的 `model.stage2.stage1_ckpt` 指向它,`stage1_step: 70000` 不动(载入时与 ckpt 里的步数比对)。单独跑第一阶段用 `configs/RnGUP_lagernvs_uni3t_b32t6_fp32lr35_wsd60k_a10k_all287k.yaml`,命令见 `scripts_s2/s2_s1ref_subset64.sbatch`。
 
-- **第二阶段**:把两组配置里的 `model.stage2.stage1_ckpt` 改成下载后的路径。`stage1_step: 70000` 不动,载入时会和 ckpt 里的 `fwdbwd_pass_step` 比对。
-- **单独跑第一阶段**:配置用 `configs/RnGUP_lagernvs_uni3t_b32t6_fp32lr35_wsd60k_a10k_all287k.yaml`,命令见 `scripts_s2/s2_s1ref_subset64.sbatch`(`inference.py`,`training.checkpoint_dir=<ckpt 文件>`)。
-- **在代码里载入**:
+**本机复现**:Isambard 上用原 `inference.py` 评测 GSO v1 subset64(作业 6906869),与原机器存档(作业 137862)相比,有位姿 PSNR 差 +0.0012 dB、LPIPS 差 −0.00003,复现成立(第 7.1 节)。
 
-```python
-ck = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
-missing, unexpected = model.load_state_dict(ck["model"], strict=False)   # model = LagerNVSInRnG(uni3t 配置)
-# 允许的缺失 / 多余键只有 loss_computer.*(感知损失 VGG)
-```
-
-- **已知问题**:这个模型用的点图真值偏了半个像素(第 10 节),新视角合成和深度指标不受影响。
-
-### 3.2 其余权重(新机器已有,这里只说明用了什么)
+### 4.2 其余权重
 
 | 权重 | 谁在用 | 放在哪 |
 |---|---|---|
-| VGGT-1B `model.pt`(`facebook/VGGT-1B`) | 构造模型时由 `torch.hub.load_state_dict_from_url` 载入,用来初始化编码器,以及相机头的 69 个张量。随后被 ckpt_70000 覆盖,但构造时必须能读到 | `$TORCH_HOME/hub/checkpoints/model.pt` |
-| `imagenet-vgg-verydeep-19.mat`(535 MB) | 感知损失 `PerceptualLoss`,`model/loss.py:39` 按相对路径读 `./metric_checkpoint/` | 仓库根目录下的 `metric_checkpoint/`。原机器上是指向 `RnG_lagernvs/metric_checkpoint` 的符号链接,不进 git |
-| `vgg16-397923af.pth`、`vgg19-dcbb9e9d.pth` | LPIPS(`lpips.LPIPS(net="vgg")`,评测用)需要 torchvision 的 VGG16 权重;两个文件在原机器的 TORCH_HOME 里都有,一并准备 | `$TORCH_HOME/hub/checkpoints/` |
-| lpips 包自带的线性层权重 | 评测 LPIPS | pip 包内 |
+| VGGT-1B `model.pt`(`facebook/VGGT-1B`) | 构造模型时载入,初始化编码器和相机头的 69 个张量,随后被 ckpt_70000 覆盖,但构造时必须能读到 | `$TORCH_HOME/hub/checkpoints/model.pt` |
+| `imagenet-vgg-verydeep-19.mat`(535 MB) | 感知损失,`model/loss.py` 按相对路径读 `./metric_checkpoint/` | 仓库根目录下的 `metric_checkpoint/`(不进 git)。Isambard 上是指向 `/projects/u6ga/zhelun/RnG_weights/metric_checkpoint` 的符号链接 |
+| `vgg16-397923af.pth`、`vgg19-dcbb9e9d.pth` | 评测 LPIPS(`lpips.LPIPS(net="vgg")`)需要 torchvision 的 VGG16 权重 | `$TORCH_HOME/hub/checkpoints/` |
 
-配置里还有几个从 RnG 继承下来的旧键:`model.pretrained_path`(VGGT)、RAE 解码器的三项、dinov3 的 `target_encoder_*`。第一阶段和第二阶段的代码路径都不读它们,不用准备。
+配置里还有几个从 RnG 继承的旧键(`model.pretrained_path`、RAE 解码器三项、dinov3 的 `target_encoder_*`,路径仍是原机器的 `/home/z50057756/…`):第一、二阶段的代码路径都不读它们,不用准备。
 
-### 3.3 数据(新机器已有,这里只说明用了什么)
+### 4.3 数据
 
-| 用途 | 数据 | 原机器路径 | 在哪里配置 |
+| 用途 | 数据 | Isambard 路径 | 在哪里配置 |
 |---|---|---|---|
-| 训练 | Objaverse all287k 渲染:每个物体一个 tar,内含 512×512 RGBA、16 位深度 PNG、transforms.json(逐帧 fov)。清单 `data/objaverse_all287k.txt` 共 287,562 个物体 | `/mnt/data-alpha-sg-02/team-camera/datasets/trellis_processed/all_train_renders` | `training.root_path`、`training.tar_root_path`、`training.dataset_path` |
-| 训练中的验证、G9 参照 | GSO `gso_sim2real_25v`(v1 渲染)。训练内用 `data/gso_subset64.txt`(64 个物体),冒烟用 `data/gso_subset4.txt` | `/home/z50057756/data/gso_sim2real_25v` | `training.val_dataset_cfgs.root_dir`、`split_file` |
-| 全量评测、G6 | GSO `gso_sim2real_25v_v2`,`data/gso.txt` 共 1030 个物体;每个物体 4 张输入 → 10 张目标,旋转 0 | `/home/z50057756/data/gso_sim2real_25v_v2` | `scripts_s2/s2_fulleval.sbatch` 里的 `GSO_ROOT` |
+| 训练 | Objaverse all287k:每个物体一个 tar(512×512 RGBA、16 位深度、transforms.json),清单 `data/objaverse_all287k.txt` 共 287,562 个物体 | `/projects/u6ga/zhelun/RnG_all287k_tars` | `training.root_path`、`training.tar_root_path` |
+| 训练内验证、G9 参照 | GSO `gso_sim2real_25v`(v1 渲染),训练内用 `data/gso_subset64.txt`,冒烟用 `data/gso_subset4.txt` | `/projects/u6ga/zhelun/RnG_samples_eval/gso_sim2real_25v` | `training.val_dataset_cfgs.root_dir`、`split_file` |
+| 全量评测、G6b | GSO `gso_sim2real_25v_v2`,`data/gso.txt` 共 1030 个物体 | **Isambard 上没有**;`scripts_s2/s2_fulleval.sbatch` 默认路径 `/projects/u6ga/zhelun/RnG_eval/gso_sim2real_25v_v2`,找不到会直接报错停下 | `GSO_ROOT` |
 
-加载器把 512 缩到 256:RGB 用 LANCZOS,深度和前景掩码用最近邻。
+加载器把 512 缩到 256:RGB 先按 `rgb*a + 255*(1-a)` 合成到白底再用 LANCZOS;深度和前景掩码用最近邻,掩码取 `> 127`。
 
 ---
 
-## 4. 迁移时要改的路径
+## 5. 换机器时要改的路径
 
-一条命令列出全部写死的路径:
+一条命令列出全部写死的 Isambard 路径:
 
 ```bash
-grep -rn "/home/z50057756\|/mnt/data-alpha" configs/S2P* scripts_s2 tools_s2 model_s2 inference_s2.py
+grep -rn "/projects/u6ga\|/scratch/u6ga\|/home/u6ga" configs/S2P* scripts_s2 tools_s2 model_s2 inference_s2.py
 ```
 
 | 文件 | 要改的 |
 |---|---|
-| `configs/S2P8_…yaml`、`configs/S2P4_…yaml` | `model.stage2.stage1_ckpt`;`training.api_key_path`;`training.root_path` 与 `tar_root_path`;`training.checkpoint_dir` 与 `validation_out_dir`(原来都是旧盘上的 `…/moe_experiments/checkpoints/${exp_name}`);`training.val_dataset_cfgs.root_dir` |
-| `scripts_s2/s2_env.sh` | `CONDA_ENV`、`TORCH_HOME`、`REPO` |
-| `scripts_s2/*.sbatch`(全部) | `#SBATCH --output/--error` 路径;`source …/s2_env.sh` 的绝对路径;分区 `gpu`、QOS `normal`/`lowest`、`--gres=gpu:h200:N`;`--exclude=lrc-alpha-sg-gpu12`(只对原集群有意义,删掉) |
-| `scripts_s2/s2_train.sbatch` | `CKPT_DIR`;磁盘预检 `df` 的路径(要求剩余 ≥ 40 GB);接力时提交自己用的绝对路径 |
+| `configs/S2P*.yaml`(6 个) | `model.stage2.stage1_ckpt`;`training.api_key_path`;`training.root_path` 与 `tar_root_path`;`training.checkpoint_dir` 与 `validation_out_dir`(现为 `/scratch/u6ga/zhelun.u6ga/S2_experiments/checkpoints/${exp_name}`);`training.val_dataset_cfgs.root_dir` |
+| `scripts_s2/s2_env.sh` | 环境激活脚本的路径;`SCRATCH` / `S2_ROOT`;`REPO` |
+| `scripts_s2/*.sbatch`(全部) | `#SBATCH --output/--error` 路径;`source …/s2_env.sh` 的绝对路径;Slurm 资源写法(Isambard 只用 `--nodes=1 --gpus=N`,不写分区) |
+| `scripts_s2/s2_train.sbatch` | 接力时提交自己用的绝对路径;磁盘预检(`$S2_ROOT` 剩余 ≥ 40 GB) |
 | `scripts_s2/s2_fulleval.sbatch` | `GSO_ROOT` |
-| `scripts_s2/s2_smoke_1gpu.sbatch`、`tools_s2/s2_diag_seq.py` | 冒烟输出目录(原来是旧盘 `…/moe_experiments/SMOKE/`) |
-| `scripts_s2/s2_s1ref_subset64.sbatch` | 第一阶段 ckpt 路径、GSO v1 路径 |
-| `scripts_s2/s2_candidate_probe.sbatch`、`tools_s2/s2_candidate_probe.py` | GSO v1 路径、环境路径 |
-| `scripts_s2/s2_bench.sbatch`、`s2_speed_profile.sbatch`、`s2_launch_track.sbatch` | 输出目录(原来是 `~/tmp/s2_bench`) |
-| `tools_s2/s2_trackhead_cost.py` | 只读导入原版 VGGT 仓 `~/code/vggt`(只有这个估算工具用到) |
+| `tools_s2/s2_gt_edge_stats.py` | 几个数据集的根目录 |
 
-**W&B key**:`setup.py` 要求 `training.api_key_path` 指向的 yaml 必须存在,内容是一行 `wandb: <你的 key>`。放在仓库外面,不要提交。冒烟脚本设了 `WANDB_MODE=offline`,但这个文件仍然要存在。
+第 12 节的 `scripts_s2/uni3t_*.sbatch`、`scripts_s2/track_probe_cpu.sbatch` 是按原机器集群写的(分区 `gpu` / `cpu`、`--gres=gpu:h200:N`、`/home/z50057756/…`),换集群时要同样改。
+
+**W&B key**:`setup.py` 要求 `training.api_key_path` 指向的 yaml 存在,内容一行 `wandb: <key>`。放在仓库外,不要提交(Isambard 上是 `/home/u6ga/zhelun.u6ga/RnG_MOE/configs/api_keys.yaml`)。
 
 ---
 
-## 5. 怎么测试
+## 6. 怎么测试、怎么运行
 
-### 5.1 CPU 单测(几十秒,不需要 GPU)
+### 6.1 CPU 单测(几十秒)
 
 ```bash
-python -m unittest tests.test_s2_geometry tests.test_s2_attention_ref tests.test_s2_modules \
-  tests.test_s2_train_contract tests.test_s2_attention_gpu tests.test_s2_init_equivalence_gpu
+sbatch scripts_s2/s2_unittest.sbatch     # Isambard 没有 CPU 分区,占 1 卡但把卡藏起来
 ```
 
-期望输出:`Ran 33 tests … OK (skipped=9)`,跳过的 9 项是 GPU 测试。2026-09-27 在原机器登录节点(2 核)实测:用时 29 秒,结果如上。
+期望:第二阶段测试 `Ran 40 tests … OK (skipped=13)`(跳过的 13 项是 GPU 测试);全仓 `discover` `Ran 109 tests … OK (skipped=19)`(含第 12 节的轨迹一致性测试)。10-13 作业 7391572 在合并了第 12 节代码的提交上、从干净导出的目录里实测如此。日志里有两段 Traceback 和几行 "No space left on device",是测试故意制造的(坏 ckpt 必须让续训报错停下;模拟磁盘写满),测试本身通过;5 分钟守护会把它们当成失败特征报出来(第 8 节第 19 条)。
 
 | 测试文件 | 项数 | 检查什么 |
 |---|---|---|
-| `test_s2_geometry` | 10 | token 编号公式;投影往返与主点约定;Morton 序是一一映射;膨胀等于最大池化;射线与 `compute_rays` 一致;打包 ↔ 补齐往返恒等;前向表、反向表与逐像素暴力实现逐格相等(0 处不同);遮挡会改变表;块编号 |
-| `test_s2_attention_ref` | 4 | 双向块、末块的输出与反向和 fp64 朴素循环一致;空行输出与梯度恰为 0,register 能看到全部 key;第一阶段的块权重能原样载入第二阶段的块 |
-| `test_s2_modules` | 5 | 块 8 拷来的张量与第一阶段相等、新层按约定初始化;块 8 开局输出等于第一阶段(小号模型);块 4 的形状与背景 token;每个可训练参数都有梯度(DDP 要求);权重衰减分组 |
-| `test_s2_train_contract` | 5 | 剪存只留最新几个和里程碑;可训练键的判定(感知 VGG 的别名键算冻结部分,buffer 也要存);续训出错必须停下(坏 ckpt、优化器不符、键不符);学习率在 1000 / 21000 / 23500 / 26000 步分别是峰值的 1 / 1 / 1−√0.5 / 0 倍;`train.py` 的接线 |
-| `test_s2_attention_gpu` | 4(GPU) | 见 5.2 |
-| `test_s2_init_equivalence_gpu` | 5(GPU) | 见 5.2 |
+| `test_s2_geometry` | 10 | token 编号、投影往返、Morton 序、膨胀、射线、打包 ↔ 补齐、前向 / 反向表与逐像素暴力实现逐格相等、遮挡、块编号 |
+| `test_s2_attention_ref` | 4 | 双向块、末块与 fp64 朴素循环一致;空行输出与梯度为 0;第一阶段块权重原样载入 |
+| `test_s2_modules` | 8 | 块 8 拷贝与新层初始化;块 8 开局等于第一阶段(小号模型,三种结构);fg 结构的场景子集和窗口表对逐 token 循环;块 4 形状(颜色头开局输出恰为 0.5 灰);每个可训练参数都有梯度(块 8 / 块 4 × 三种结构);权重衰减分组;**09-28 新增**:`stage1_painted` / `tiles_from_painted` / `build_layout` 对逐像素、逐图块暴力循环(外扩 0、1、2 圈);非 fg_dense 结构用第一阶段选图块会报错 |
+| `test_s2_train_contract` | 5 | 剪存、可训练键判定、续训出错必须停下、学习率曲线、`train.py` 接线 |
+| `test_s2_attention_gpu` | 4(GPU) | 见 6.2 |
+| `test_s2_init_equivalence_gpu` | 9(GPU) | 见 6.2 |
 
-全仓测试(含第一阶段的旧测试)可以用 `python -m unittest discover -s tests` 跑。09-27 在提交 a4d57b1 时是 83 项全过,之后没有重跑全仓。
-
-### 5.2 GPU 单测(1 卡,需要第一阶段权重)
+### 6.2 GPU 单测(1 卡,需要第一阶段权重)
 
 ```bash
-sbatch scripts_s2/s2_gpu_tests.sbatch        # $1 可指定测试模块;$2 可加诊断环境变量,如 "CUDA_LAUNCH_BLOCKING=1"
+sbatch scripts_s2/s2_gpu_tests.sbatch        # $1 可指定测试模块;$2 可加诊断环境变量
 ```
 
-- `test_s2_attention_gpu`(4 项):sdpa 高效内核、flex 各自对 fp64 参照(前向与梯度);FA3 块对角路径对分段参照;建表过程在 `set_sync_debug_mode("error")` 下没有主机同步。
-- `test_s2_init_equivalence_gpu`(5 项,用真实的 ckpt_70000):包装里的第一阶段路径与 `LagerNVSInRnG.forward` 逐位相同,块 8 开局输出与第一阶段逐位相同;训练模式下的随机抽签与第一阶段一致;第二遍的深度和屏蔽表合理;一步 AdamW 只更新第二阶段,第一阶段权重逐位不变;块 4 前向输出有限。
-- **已知**:"块 8 开局逐位相同"在原集群 gpu12 上出现过一次无法解释的失败(作业 137836),之后 11 次运行全过。新机器上请连跑几次。`scripts_s2/s2_gpu_tests_loop.sbatch` 可以换不同的 `PYTHONHASHSEED` 在多个进程里重复跑。
+- `test_s2_attention_gpu`(4 项):sdpa、flex 对 fp64 参照(前向与梯度);FA3 块对角路径;建表过程没有主机同步。
+- `test_s2_init_equivalence_gpu`,`InitEquivalenceTests`(5 项,真实 ckpt_70000):包装里的第一阶段路径与 `LagerNVSInRnG.forward` 逐位相同;块 8 原结构开局与第一阶段逐位相同;训练模式随机抽签一致;第二遍深度与屏蔽表合理;一步 AdamW 只动第二阶段;块 4 前向有限。
+- 同文件 `FgStructureInitTests`(4 项:fg_dense、fg_dual、两个第一阶段选图块配置):开局与第一阶段逐位相同(有位姿、无位姿);第一阶段选图块配置的每视角图块数与从第一阶段渲染图独立重数的结果相等;一步 AdamW 后所有参数梯度有限;**第 2 步**目标嵌入层的射线通道梯度非零,掩码通道在 `mask_input: zero` 时梯度恰为 0、其余配置非零(为什么查第 2 步而不是第 1 步:第 8 节第 14 条)。
+- 09-28 作业 6922990 + 6923024 全过;10-13 合并第 12 节的代码(它改了第一阶段的 `model/loss.py`、`model/lagernvs_wrapper.py`)后,作业 7391572 再跑 13 项全过,第二阶段里第一阶段路径仍与 `LagerNVSInRnG.forward` 逐位相同。原机器上那次无法解释的失败(作业 137836)在 Isambard 上没有再现:作业 6906713 和换 5 个 `PYTHONHASHSEED` 的连跑 6906715 全过。
 
-### 5.3 冒烟(1 卡,不超过 1.5 小时)
+### 6.3 冒烟(1 卡)
 
 ```bash
-sbatch scripts_s2/s2_smoke_1gpu.sbatch configs/S2P8_uni3t70k_b32t6_lr35_a21k26k.yaml
-sbatch scripts_s2/s2_smoke_1gpu.sbatch configs/S2P4_uni3t70k_b32t6_lr35_a21k26k.yaml
+sbatch scripts_s2/s2_smoke_1gpu.sbatch configs/S2P8fgdense_uni3t70k_b32t6_lr35_a21k26k.yaml
 ```
 
 | 段 | 内容 | 过关条件 |
 |---|---|---|
-| leg 0 | 动力学探针:同一个 batch 训 40 步 | 零初始化的输出层(Lin_m、块 4 颜色头)第 1 步就离开 0 并继续增大;其余零初始化张量到末步非零;L2 损失降到第 0 步的 0.9 倍以下 |
-| leg A | 60 步(batch 2、warmup 10、第 50 步起退火,第 30、60 步存 ckpt,在 4 个物体上做有位姿 + 无位姿验证) | 跑完、无 NaN |
-| leg B | 从第 60 步续训到 90 步 | 必须真的续训,不能重新开始 |
+| leg 0 | 动力学探针:同一个 batch 训 40 步 | 零初始化输出层第 1 步就离开 0 并增大;L2 损失降到第 0 步的 0.9 倍以下 |
+| leg A | 60 步(batch 2,第 30、60 步存 ckpt,4 个物体有位姿 + 无位姿验证) | 跑完、无 NaN |
+| leg B | 从 60 步续训到 90 步 | 必须真的续训 |
 | leg C | 故意截断最新 ckpt | 必须以 `[resume]` 报错停下 |
-| leg D | 检查 ckpt | 零初始化输出层已经动了;ckpt 里的键 = 可训练参数的键 |
+| leg D | 检查 ckpt | 零初始化输出层已经动了;ckpt 的键 = 可训练参数的键 |
 
-日志里 `[s2-smoke]` 开头的门都应是 PASS。每个 ckpt 约 3 GB。
+Isambard 上:块 8 原结构 6906717、块 4 原结构 6906719、fg_dense 6909937、fg_dual 6909971 / 6910162 全部门过关。
 
-### 5.4 评测通路(G6)
+### 6.4 测速
 
-```bash
-# 关掉第二阶段,必须逐物体复现第一阶段的存档评测
-sbatch scripts_s2/s2_fulleval.sbatch none S2off "posed unposed" configs/S2P8_uni3t70k_b32t6_lr35_a21k26k.yaml <输出根> 64
-python tools_s2/s2_compare.py <输出根>/S2off_posed_novel <第一阶段存档评测目录> --gate
-```
+- **整步训练速度(G8)**:`tools_s2/s2_bench.py`,batch 8、12 个真实训练 batch,丢前 100 步、再测若干步,每条配置一腿,全部腿在同一作业、同一张卡上串行跑(`scripts_s2/s2_bench.sbatch`、`s2_bench_fg.sbatch`)。结果按 `exp_name` 记(09-28 修过,第 8 节第 12 条)。
+- **分阶段推理耗时**:`tools_s2/s2_stage_timing.py`(`scripts_s2/s2_stage_timing.sbatch`):重建 / r0 / 再渲一遍 / 建表 / r1 / 头,分解成"主机同步 + 转权重 + 发射开销 + GPU 计算"。纯 GPU 时间一律取 CUDA Graph 重放,不用 profiler 的求和。
+- **r0 / r1 对照**:`tools_s2/s2_r1_timing.py`,直接调 `Stage2LagerNVS.make_ctx` 和渲染器,测 1 张 / 10 张时的图块数、r0、r1(eager 与 CUDA Graph)。`scripts_s2/s2_speed_s1sel.sbatch` 是 09-28 开训前的测速作业。
+- 规矩:同一组测速必须在同一作业、同一节点内完成;以一个旧测点作锚点核对节点间误差。
 
-第一阶段的存档评测目录只在原机器上(第 7.2 节有数字)。新机器上可以先用原 `inference.py` 跑一份第一阶段评测(`scripts_s2/s2_s1ref_subset64.sbatch` 的写法),再拿来对照。
-
-### 5.5 测速与守护
-
-- 测速:`sbatch scripts_s2/s2_bench.sbatch <输出 json>`。块 8 / 块 4 × sdpa / flex 四腿在同一个作业、同一张卡上串行跑;每腿丢前 100 步、测 200 步。
-- 规矩:同一组测速必须在同一作业、同一节点内完成;测试类作业要挂 5 分钟守护 `bash scripts_s2/s2_watch.sh <jobid> <out> <err> 300`。守护在出现失败特征、作业进入终态、或日志连续 4 次不增长时退出。
-
----
-
-## 6. 怎么运行
-
-### 6.1 训练(4 × H200)
+### 6.5 训练(4 × GH200)
 
 ```bash
-sbatch scripts_s2/s2_train.sbatch configs/S2P8_uni3t70k_b32t6_lr35_a21k26k.yaml 26000
+sbatch -J s2-<名字> scripts_s2/s2_train.sbatch configs/<配置>.yaml 26000
 ```
 
-- **接力**:单个作业 2 天上限。脚本启动时会先排一个后继作业(`afterany`),从最新 ckpt 续训。续训出错直接停下,不会静默从第 0 步重来。要停下整条接力,执行 `touch <ckpt 目录>/RELAY_STOP`。
-- **ckpt**:只存可训练参数,每个约 3 GB。只保留最新 2 个,加 21000 和 26000 两个点。
-- **验证**:每 2000 步一次,包括第 0 步。有位姿和无位姿各跑一遍,数据是 subset64、旋转 0。
+- **接力**:Isambard 单作业上限 24 小时。脚本启动时先排一个后继作业(`afterany`),从最新 ckpt 续训;没有进展就失败时自己写 `RELAY_STOP` 并取消后继。要停整条接力:`touch <ckpt 目录>/RELAY_STOP`,再 `scancel` 后继和当前作业(先取消后继,否则当前作业一结束后继就会启动)。
+- ⚠ **续训不恢复数据位置**(第 8 节第 6 条):续训后会把当前 epoch 已读过的数据再读一遍,两条配对的线若在不同步数续训,数据顺序就不再相同。超过 24 小时的训练要先修。
+- **ckpt**:只存可训练参数,每个约 2.6–3 GB;fg 配置每 1000 步存一次,只保留最新 2 个,加 21000 和 26000 两个点。
+- **验证**:每 2000 步一次(含第 0 步),有位姿和无位姿各一遍,数据 subset64,旋转 0。
 - **配方**:
-  - 数据 all287k,每卡 batch 8 × 4 卡 = 32。每个样本 4 张输入 + 6 张目标。
+  - 数据 all287k,每卡 batch 8 × 4 卡 = 32,每个样本 4 张输入 + 6 张目标。
   - AdamW β (0.9, 0.95);二维以上参数 wd 0.05;梯度裁剪 1.0;bf16 autocast + fp32 主权重。
-  - 学习率一组 3.5e-5:warmup 1000 步,恒定到 21000 步,再按 1−√ 进度退火,26000 步到 0。
+  - 学习率 3.5e-5:warmup 1000 步,恒定到 21000 步,再按 1−√ 进度退火,26000 步到 0。
   - 增强:±10° 平面内旋转;10% 的样本目标图就是输入图;40% 的样本不给位姿。
-  - 损失:L2 × 1.0 + 感知 × 0.5 + 点图 × 0.2(置信度项与 L1 各占 0.5);不用位姿损失。
-- **预计时长**(G8 实测步时):块 8 为 3.885 秒/步,26k 步约 28 小时;块 4 为 6.290 秒/步,约 45 小时。
-- ⚠ **结构定下来之前不要开训**(第 8.1 节)。
+  - 损失:L2 × 1.0 + 感知 × 0.5 + 点图 × 0.2;全图损失(没有只算前景的阶段);不用位姿损失。
+- **实测时长**(GH200):fg_dense 训练中约 1.9–2.0 秒/步,26k 步 14.2 小时(4 卡,约 57 GPU·h);fg_dual(修好后)2.4–2.7 秒/步;两个第一阶段选图块配置约 2.0 秒/步。原结构块 8 / 块 4 按 G8 是 4.07 / 6.52 秒/步(第 7.3 节)。
 
-### 6.2 全量评测
+### 6.6 评测与训练关口(G9)
 
 ```bash
 sbatch scripts_s2/s2_fulleval.sbatch <第二阶段 ckpt 文件 | none> <标签> "posed unposed" <配置> <输出根> [前 N 个物体]
-python tools_s2/s2_compare.py <输出根>/<标签>_posed_novel <输出根>/<标签>_posed_novel_s1 --out cmp_posed.json
+sbatch scripts_s2/s2_s1ref_fp32m.sbatch                                     # 第一阶段 fp32 指标参照(G9 用)
+python tools_s2/s2_train_check.py step0  <ckpt 目录> <参照输出根>             # 第 0 步验证必须等于第一阶段
+python tools_s2/s2_train_check.py safety <ckpt 目录> 4000 <训练日志>          # 4k 步安全线
+python tools_s2/s2_pairdiff.py <目录 A> <目录 B>                              # 两个评测目录逐物体对照
 ```
 
-- 一次前向同时写 `<标签>_<模式>_novel`(第二阶段)和 `..._novel_s1`(同一次前向里冻结的第一阶段),每个目录里都有 metrics / 深度 / 位姿三份汇总和 `regions.json`。
-- `s2_compare.py` 按物体配对,报两者之差的均值,以及按物体有放回重抽 1000 次得到的 95% 区间。
-- 判读(事先定的):主看 LPIPS,差值 ≤ −0.003 且 95% 区间不含 0 才算有效。PSNR 以 0.6 dB、前景 PSNR 以 0.5 dB 为辅助信号线,两者冲突时以 LPIPS 为准。0.003 / 0.6 / 0.5 这三条线是本项目沿用的噪声线。
-- `regions.json` 按区域报误差:轮廓带(真值轮廓两侧 4 像素)、所有输入图都没拍到的区域、物体内部纹理区(图像梯度最大的 20% 前景像素)、深度跳变处。
+- **step0**:逐物体对照第一阶段:|ΔPSNR| ≤ 0.02 dB,|Δabs_rel| ≤ 1e-4,|ΔLPIPS| ≤ 1 个 bf16 步长。bf16 步长 = `2^(floor(log2(v)) - 7)`,v 是两边 LPIPS 中较大的那个;LPIPS 在 0.03–0.06 时一步是 2.4e-4,在 0.06–0.12 时是 4.9e-4。放宽到一个步长的原因:第 8 节第 2 条。参照必须是 fp32 指标(第 8 节第 3 条)。
+- **safety**:非有限损失跳过的步 < 1%;渲染图像素标准差 `render_std` 没有低于自身中位数一半的读数(防止输出塌成一片);两种相机设定的验证 LPIPS 比第 0 步差不超过 0.003。
+- **判读用的信号线**(本项目沿用):LPIPS 0.003、PSNR 0.6 dB、前景 PSNR 0.5 dB。同一个 ckpt 重复评测,LPIPS 的抖动约 0.002,所以变化小于信号线不算有效。有效变化还要求逐物体配对的 95% 区间不含 0,并在连续几个验证点上成立。
 
-### 6.3 训练关口检查(G9)
-
-```bash
-python tools_s2/s2_train_check.py step0 <ckpt 目录> <s1ref 输出根>          # 第 0 步验证必须等于第一阶段
-python tools_s2/s2_train_check.py safety <ckpt 目录> 4000 <日志…> --world 4  # 4k 步安全线
-```
-
-- step0:逐物体对照第一阶段,|ΔPSNR| ≤ 0.02 dB、|ΔLPIPS| ≤ 2e-4、|Δabs_rel| ≤ 1e-4。
-- safety:NaN 跳步 < 1%;render_std 没有低于自身中位数一半的点;两种设定的验证 LPIPS 比第 0 步差不超过 0.003。
-
-### 6.4 工具一览(`tools_s2/`)
+### 6.7 工具一览(`tools_s2/`)
 
 | 工具 | 用途 |
 |---|---|
-| `s2_candidate_probe.py` | 用冻结第一阶段的点做几何对应,误差有多大(投影误差、窗口命中率、可见性) |
-| `s2_dynamics_probe.py` | 动力学探针:各参数组每步位移 / lr、梯度范数、零初始化层是否动 |
-| `s2_bench.py` | 整步训练测速(第 5.5 节) |
-| `s2_attn_profile.py` | 屏蔽表密度、单次注意力调用耗时 |
-| `s2_infer_bench.py`、`s2_infer_profile.py` | 推理延迟:只跑第一阶段 vs 第一 + 第二阶段 |
-| `s2_renderer_debug.py` | 渲染器按部件计时,以及几个结构假设的计时 |
-| `s2_fgdense_whatif.py` | 只测速度的结构原型:`--variants fg_dense,fg_static,fg_dual`(第 7.4 节) |
-| `s2_launch_profile.py` | 渲 1 张 / 10 张时的 kernel 数和 GPU 实际计算时间 |
-| `s2_trackhead_cost.py` | VGGT TrackHead 在我们形状上的开销估算 |
-| `s2_graph_bench.py`(+ `scripts_s2/s2_graph_bench.sbatch`) | 推理加速:bf16 权重 + CUDA Graph,1 张 / 10 张各一个进程 |
-| `s2_graph_blockers.py` | 找出妨碍 CUDA Graph 录制的主机同步 |
-| `s2_diag_seq.py`、`s2_diag_init.py` | 起点等价失败时的诊断 |
-| `s2_regions.py`、`s2_compare.py`、`s2_train_check.py` | 区域指标、配对比较、训练关口 |
-| `check_pointmap_on_ray.py` | 点图半像素 bug 的验收(第 10 节) |
+| `s2_bench.py` | 整步训练测速(G8) |
+| `s2_stage_timing.py`、`s2_r1_timing.py` | 分阶段推理耗时;r0 / r1 对照(第 6.4 节) |
+| `s2_graph_bench.py` | bf16 权重 + CUDA Graph 的推理测速与一致性 |
+| `s2_fgdense_whatif.py` | 只测速度的结构原型(fg_dense / fg_static / fg_dual) |
+| `s2_dense_equiv.py` | 稀疏注意力是否等于"全量注意力 + 不允许的位置填负无穷"(第 7.2 节) |
+| `s2_train_check.py`、`s2_pairdiff.py`、`s2_compare.py`、`s2_regions.py` | G9 关口;逐物体对照;配对重抽;区域指标 |
+| `s2_dynamics_probe.py` | 动力学探针:各参数组每步位移 / lr |
+| `s2_fgdual_profile.py`、`s2_fgdual_ab.py` | fg_dual 慢的定位;修复前后逐位 / 梯度对照 |
+| `s2_ring_analysis.py`、`s2_gt_edge_stats.py`、`s2_mask_composite.py`、`s2_patch_split.py` | 第 7.8 节的分析:误差按离轮廓距离分布;各数据集真值边缘;贴真值 alpha 的对照;按图块类别拆误差 |
+| `s2_edge_seams.py` | 图块接缝诊断、边界叠加图、"第一阶段选图块"的覆盖率估计(第 7.8 节) |
+| `s2_web_assets.py` | 对照网页的素材(第 7.12 节) |
+| `s2_residual_audit.py` | r1 残差审计(第 7.11 节) |
+| 其余(`s2_candidate_probe.py`、`s2_attn_profile.py`、`s2_infer_bench.py`、`s2_infer_profile.py`、`s2_renderer_debug.py`、`s2_launch_profile.py`、`s2_trackhead_cost.py`、`s2_graph_blockers.py`、`s2_diag_seq.py`、`s2_diag_init.py`、`check_pointmap_on_ray.py`) | 原机器时期的诊断工具,说明见各文件开头 |
 
 ---
 
-## 7. 已完成的内容与结果
+## 7. 实验记录
 
-### 7.1 关口状态
+### 7.0 关口状态
 
 | 关口 | 内容 | 状态 | 依据 |
 |---|---|---|---|
-| G0 | 开 `stage2` 分支、修 `.gitignore` | ✅ | 提交 62d9829 |
-| G1 | 几何与屏蔽表 + CPU 测试 | ✅ | 与逐像素暴力实现 0 处不同(c5902b3) |
-| G2 | 注意力参照 + 块 | ✅ | 与 fp64 逐行参照差在 1e-9 以内(5ecf061) |
-| G3 | 包装、第一阶段调用、渲染器、头 | ✅ | CPU 模块测试(44369a5) |
-| G4 | GPU 测试 | ✅ | 作业 137850–137854 全过;137836 在 gpu12 上失败过一次,原因不明(第 5.2 节) |
-| G5 | 训练与续训改动 | ✅ | 全仓 83 项 CPU 测试(a4d57b1) |
-| G6a | 关掉第二阶段,`gso.txt` 前 64 个物体复现第一阶段 | ✅ | 作业 137834:逐物体 PSNR / LPIPS / SSIM / 前景 PSNR / abs_rel 最大差 0 |
-| G6b | 同上,全部 1030 个物体 | ⏳ 未跑 | |
-| G7 | 块 8 / 块 4 冒烟 | ✅ | 137856、137857(SDPA);137872、137873、137876(flex)。各段全过 |
-| G8 | 同节点测速,选后端 | ✅ | 137861:两组都用 flex(7.3 节) |
-| G9 | 开训 + 第 0 步对照 + 4k 安全线 | ⏳ | 第一阶段参照已完成(137862,7.2 节);块 8 训练 137864 在 09-27 被取消,从未开跑,原因见 7.4 |
-| G10 / G11 | 块 8 / 块 4 训满 26k,全量评测 + 配对重抽 | ⏳ | |
+| G0–G5 | 分支、几何、注意力参照、包装、GPU 测试、训练与续训改动 | ✅ | 原机器;Isambard 上 CPU / GPU 单测全过(第 6.1、6.2 节) |
+| G6a | 关掉第二阶段,`gso.txt` 前 64 个物体复现第一阶段 | ✅ | 原机器作业 137834 |
+| G6b | 同上,全部 1030 个物体 | ⏳ 未跑 | Isambard 上没有 GSO v2 全量 |
+| G7 | 冒烟 | ✅ | 第 6.3 节 |
+| G8 | 同节点测速、选后端 | ✅ | 第 7.3 节 |
+| G9 | 开训 + 第 0 步对照 + 4k 安全线 | ✅ | 第 0.1 节四个实验全过(第 7.6、7.7、7.9、7.10 节) |
+| G10 | 块 8 训满 26k + 全量评测 | 部分 | `S2P8fgdense_uni3t70k_b32t6_lr35_a21k26k` 训满,但它依赖真值掩码;全量评测没做(缺 GSO v2) |
+| G11 | 块 4 训满 26k | ⏳ | 第 9.2 节 |
 
-动力学探针(G7,固定 batch 4,40 步,恒定 lr):块 8 的 L2 降到第 0 步的 0.820 倍,块 4 降到 0.441 倍(flex 版)。第 1 步渲染器侧梯度恰为 0,这是 Lin_m 零初始化的预期结果;从第 2 步起,各组每步位移为 0.25–0.65 倍 lr。
-
-### 7.2 第一阶段参照(ckpt_70000)
+### 7.1 第一阶段参照与本机复现
 
 | 评测 | 设定 | PSNR | LPIPS | SSIM | 前景 PSNR | abs_rel | 位姿 AUC30 |
 |---|---|---|---|---|---|---|---|
-| 全量 v2,1030 个物体(G6b 参照) | 有位姿 | 26.2196 | 0.09774 | 0.8969 | 21.99 | 0.01207 | 99.04% |
+| 全量 v2,1030 个物体(原机器,G6b 参照) | 有位姿 | 26.2196 | 0.09774 | 0.8969 | 21.99 | 0.01207 | 99.04% |
 | 同上 | 无位姿 | 25.0544 | 0.10445 | 0.8845 | 21.07 | 0.01515 | 92.38% |
-| v1 subset64,原 `inference.py`(G9 第 0 步参照,137862) | 有位姿 | 25.2119 | 0.09247 | 0.8946 | 21.29 | 0.01082 | 97.86% |
+| v1 subset64,原 `inference.py`(原机器 137862) | 有位姿 | 25.2119 | 0.09247 | 0.8946 | 21.29 | 0.01082 | 97.86% |
 | 同上 | 无位姿 | 24.0673 | 0.10201 | 0.8816 | 20.16 | 0.01412 | 87.14% |
-| v2,`gso.txt` 前 64 个物体,第二阶段关闭(G6a,137834) | 有位姿 | 25.9001 | 0.09289 | 0.8934 | 21.19 | 0.01070 | 99.43% |
-| 同上 | 无位姿 | 24.9508 | 0.09805 | 0.8832 | 20.52 | 0.01322 | 94.84% |
+| v1 subset64,原 `inference.py`(**Isambard 6906869**) | 有位姿 | 25.2131 | 0.09244 | 0.8946 | 21.29 | — | — |
+| 同上 | 无位姿 | 24.0678 | 0.10202 | 0.8816 | 20.16 | — | — |
+| v1 subset64,fp32 指标参照(Isambard 6910144,G9 用) | 有位姿 / 无位姿 | 25.2131 / 24.0678 | 0.09246 / 0.10202 | 0.8946 / 0.8816 | 21.29 / 20.16 | — | — |
 
-表注:所有评测都是每个物体 4 张输入 → 10 张目标,旋转 0。abs_rel 是深度相对误差,越低越好。位姿 AUC30 是输入图相对位姿误差在 30° 内的曲线下面积,越高越好。原机器上的存档目录是 `…/moe_experiments/evaluation/uni3t_a10k_step70000_{posed,unposed}_novel/` 和 `…/moe_experiments/evaluation/s2/`。
+表注:所有评测都是每个物体 4 张输入 → 10 张目标,旋转 0。abs_rel 是深度平均相对误差。Isambard 与原机器同口径的差:有位姿 PSNR +0.0012 dB、LPIPS −0.00003,远小于信号线,复现成立。fp32 参照与 bf16 指标的 LPIPS 差在 1e-5 量级,来源见第 8 节第 3 条。
 
-### 7.3 训练速度(G8,作业 137861,同节点 1 卡,batch 8,12 个真实 batch,丢前 100 步测 200 步)
+### 7.2 稀疏注意力 = 全量注意力 + 负无穷屏蔽
 
-| 组 | SDPA 步时(中位 / p90) | flex 步时(中位 / p90) | flex 快多少 | 峰值显存(SDPA / flex) |
+- **为什么查**:第二阶段只算"允许的"注意力对,要确认它和"全量注意力、不允许的位置填负无穷"是同一个函数。
+- **做了什么**:`tools_s2/s2_dense_equiv.py` 在真实数据的一次前向上,把每个注意力调用点(原结构的自注意力 / 压缩 / 窗口 / 反向;fg 结构的前景全量两个方向、fg_dual 的窗口两个方向)与 fp64 的"全量 + 负无穷"参照逐个比较,含 bf16 下 SDPA 自身的误差作尺子、"不加屏蔽"作反面对照。作业 6906898(原结构块 8、块 4)、6909995、6910163(fg_dense、fg_dual)。
+- **结果**:全部规则 ALL PASS,差别在 bf16 舍入范围内。
+
+### 7.3 测速:r0 / r1 / 重建,以及旧结论的修正
+
+**为什么测**:用户 09-27 定的判据——第二阶段渲染器(r1)必须比第一阶段渲染器(r0)便宜,否则这个设计无效。
+
+**原机器(H200)**的测速结果保留在第 7.4 节表中。**Isambard(GH200)**:
+
+整步训练速度(G8,作业 6906793,同节点 1 卡,batch 8,丢前 100 步测 200 步):
+
+| 组 | SDPA 中位步时 | flex 中位步时 | 原机器 H200(作业 137861) | GH200 / H200 |
 |---|---|---|---|---|
-| 块 8 | 4.606 / 4.881 秒 | 3.885 / 4.068 秒 | 15.7% | 41.7 / 41.2 GB |
-| 块 4 | 8.335 / 9.724 秒 | 6.290 / 7.122 秒 | 24.5% | 52.5 / 51.0 GB |
+| 原结构块 8 | 4.726 秒 | 4.068 秒 | 4.606 / 3.885 秒 | 1.03 / 1.05 |
+| 原结构块 4 | 8.910 秒 | 6.520 秒 | 8.335 / 6.290 秒 | 1.07 / 1.04 |
 
-- 省下的时间都在第二阶段渲染器。块 8 前向 671→542 ms、反向 2750→2128 ms;块 4 前向 1222→708 ms、反向 6260→4429 ms。
-- 冻结第一阶段的两遍前向(不求梯度)每步 1.12 秒,占块 8 SDPA 整步的 24%(换成 flex 后约 29%)。
-- 事先定的规则是:flex 整步快 10% 以上、且通过等价测试才用。两组都满足,所以都用 flex。
+推理分阶段耗时(作业 6908311,batch 1,有位姿,原结构块 8,单位 ms;"纯 GPU" = CUDA Graph 重放、bf16 权重):
 
-### 7.4 速度诊断:为什么现在的结构不行(训练因此没开)
+| 阶段 | 渲 1 张:eager = 同步 + 转权重 + 发射开销 + 纯 GPU | 渲 10 张:eager / 纯 GPU |
+|---|---|---|
+| 重建(DINOv2 + aggregator) | 107.5 = 17.3 + 4.8 + 6.4 + 79.0 | 110.8 / 79.2 |
+| r0 | 34.6 ≈ −2.0 + 2.4 + 25.1 + 9.0 | 74.0 / 72.3 |
+| r1(原结构) | 75.0 ≈ −2.6 + 6.4 + 52.8 + 18.4 | 124.9 / 121.1 |
 
-用户 09-27 定的判据:**第二阶段渲染器必须比第一阶段渲染器快很多,否则这个设计无效,要重想结构。**
+表注:分解的算法——同步 = 原代码耗时减去去掉三处主机同步后的耗时;转权重 = 再减去"权重预先存成 bf16"后的耗时;发射开销 = 再减去 CUDA Graph 重放耗时(纯 GPU)。负数是测量误差。
 
-**端到端推理**(batch 1,4 张输入 → 10 张目标,有位姿;作业 137892):
+r1 候选(作业 6908311,纯 GPU 时间,块 8,渲 1 张 / 10 张,目标图块按真值掩码选):
 
-- 只跑第一阶段:176 ms/场景。
-- 加上第二阶段:块 8 为 348 ms(flex;SDPA 362),块 4 为 396 ms(flex;SDPA 444)。
-- 块 8 多出的 172 ms = 第二遍 35 + 建表 9 + 第二阶段渲染器 119 + 头 10。
+| r1 | 1 张 | 10 张 | 10 张时对 r0(72.3 ms) |
+|---|---|---|---|
+| 原结构 | 18.4 | 121.1 | 慢 1.7 倍,不满足 |
+| fg_dense | 5.4 | 24.6 | 0.34 倍 |
+| fg_static | 3.3 | 6.7 | 0.09 倍 |
+| fg_dual | 7.9 | 37.6 | 0.52 倍 |
 
-**渲染器对比**(作业 137897;第一阶段渲染器是 uni3t 原有的稠密渲染器):
+同一作业的块 4 原型(10 张,纯 GPU):原结构 151.3、fg_dense 39.9、fg_static 18.9、fg_dual 60.5 ms;r0 72.4 ms。fg_dense 的正式实现在 09-28 复测为 24.5 ms(作业 6922991),与原型的 24.6 ms 一致。
+
+**结论**:
+1. 渲 10 张时,原结构 r1 比 r0 慢,原因是结构本身(每张目标图保留一份场景 token、在每份上逐 token 压缩,第 7.4 节);fg_dense / fg_dual 满足判据。
+2. 渲 1 张时,时间主要花在 Python 逐个发射 kernel:r0 的 34.6 ms 里发射开销 25.1 ms(73%),r1 的 75.0 ms 里 52.8 ms(70%)。"转权重"只占 2.4 / 6.4 ms。
+3. bf16 权重 + CUDA Graph(作业 6906793,原结构块 8):输出与 fp32 权重逐位相同;整条推理渲 1 张从 251.2 降到 159.1 ms,渲 10 张从 357.3 降到 343.1 ms。
+
+**修正原 README 的三条旧结论**(原机器作业 137900 的旧工具得出):
+- "第一阶段渲染器 GPU 实算 4.8 ms" → 实测 9.0 ms。旧工具把 profiler 记录的 kernel 时间求和,漏掉了约一半 kernel;现在纯 GPU 时间一律取 CUDA Graph 重放。
+- "80% 的 kernel 是 `aten::copy_`(转权重)" → r0 渲 1 张时是 530 / 1333 = 40%,r1 是 1154 / 3081 = 37%;转权重的总耗时只有 2–6 ms。
+- "渲 1 张时 GPU 只有 40% 左右的时间在算" → 只看 r0,纯 GPU 9.0 / 34.6 = 26%;发射开销才是主要成本。
+
+### 7.4 结构选择
+
+原机器上的测速(作业 137897 / 137899,H200,目标图块按真值掩码选):
 
 | 渲染器 | 训练形状(48 张目标图) | 推理 10 张 | 推理 1 张 |
 |---|---|---|---|
 | 第一阶段渲染器 | 300 ms | 66.6 ms | 33.1 ms |
-| 第二阶段,现结构(压缩 + 几何窗口) | 541 ms(1.8 倍) | 120.5 ms | 76.9 ms |
+| 第二阶段,原结构(压缩 + 几何窗口) | 541 ms(1.8 倍) | 120.5 ms | 76.9 ms |
 | 原型 fg_dense:两边都只对前景做全量注意力 | 125.5 ms(0.42 倍) | 42.2 ms | 40.9 ms |
 | 原型 fg_static:fg_dense + 场景侧不更新、各目标图共用 | 34.6 ms(0.12 倍) | 19.2 ms | 28.3 ms |
+| 原型 fg_dual:前景全量 + 几何窗口,门控相加(用户 09-27 提) | 180.7 ms(0.60 倍) | 63.1 ms | 61.2 ms |
 
-表注:原型只测速度,不训练。输入图里的前景场景 token 占 35%(评测)到 41%(训练,向外扩一圈 token)。推理 1 张时的计时受 CPU 状态影响大,只比同一状态下的读数。
+- 原结构慢在场景侧(原机器作业 137896):渲 10 张时 r1 71% 的时间在场景侧,其中新加的压缩、块平均、拷贝、注入占 50.8 ms。
+- fg_dual 与原结构还多一笔"把输入相机再渲一遍 + 建表"(训练约 +250 ms/步,推理约 +50 ms);fg_dense 不需要。
+- 用 VGGT TrackHead 代替"再渲一遍 + 建表"更贵(作业 137901),不划算。
+- **决定(用户 09-28)**:fg_dense 和 fg_dual 一起训,只训块 8,按原配方 26k。G9 第 0 步关口取方案 B(第 8 节第 2 条)。
+- GH200 上的 G8(作业 6910164,同节点 1 卡):原结构 4.069 秒/步,fg_dense 1.767,fg_dual 2.379(修好之后,第 8 节第 5 条)。
+- fg_static 一直没有实现成可训练的代码。
 
-**第二个原型 fg_dual**(用户 09-27 提:保留几何窗口,两路 = 前景全量 + 几何窗口稀疏,门控相加,两个方向都这样;作业 137899):
-
-| 渲染器 | 训练形状 | 推理 10 张 | 推理 1 张 |
-|---|---|---|---|
-| 第一阶段渲染器 | 302 ms | 66.8 ms | 约 34 ms |
-| fg_dual | 180.7 ms(0.60 倍) | 63.1 ms | 61.2 ms |
-| fg_dense(同一作业复测) | 107.9 ms | 43.2 ms | 42.4 ms |
-
-保留窗口还有额外代价:几何窗口和可见性都需要"把输入相机再渲一遍"并建屏蔽表。这两步在训练前向中约多 250 ms/步,推理约多 50 ms。fg_dense 不需要它们。
-
-**现结构慢在哪**(作业 137896,推理,块 8):
-
-- 渲 10 张时,第二阶段渲染器 71% 的时间花在场景侧:继承来的部分 37.5 ms,新加的压缩、块平均、拷贝、注入 50.8 ms。目标侧只有 11 ms,其中 flex 注意力 10.6 ms,和第一阶段稠密 FA3 一样快。
-- 根因是结构:每张目标图都保留一份场景 token,并在每一份上逐 token 做压缩。
-- 把压缩融合成一个等价算子(torch.compile,差 1 个 bf16 舍入单位)后,10 张从 120 降到 86.5 ms,仍是第一阶段的 1.3 倍。
-
-**渲 1 张为什么也慢**(作业 137900,profiler):
-
-- 这时耗时由 Python 发射 kernel 决定,GPU 只有 40% 左右的时间在算。
-- GPU 实际计算:第一阶段渲染器 4.8 ms / fg_dense 3.1 / fg_dual 4.5 / 现结构 9.6 ms。kernel 数:667 / 787 / 1054 / 1541 个,每个约 45–90 µs。
-- 80% 的 kernel 是 `aten::copy_`:推理不求梯度时,autocast 不缓存权重转换,每次 Linear 都要拷一次 bf16;RMSNorm 还有 fp32 往返。
-
-**其他测过的**:
-
-- 输入相机再渲一遍:训练形状是 32 张图,229 ms(每张 6.4 ms,与目标图相同);推理 4 张 34 ms,其中 GPU 实算 14.3 ms。
-- 用 VGGT TrackHead 代替"再渲一遍 + 建表"(作业 137901,位置编码缓存后):推理 1 张 72 ms、10 张 116 ms;训练 48 张冻结 0.57 秒,联合训练约 2.2 秒/步。都比它要替换的部分(推理约 51 ms、训练约 0.26 秒)更贵,所以不划算。
-- bf16 权重(作业 137905,渲 1 张):输出与 fp32 权重逐位相同。只第一阶段 136.9→132.0 ms,加第二阶段 250.0→240.3 ms,几乎不提速。
-- CUDA Graph:VGGT 里有两处主机同步挡住录制——`vggt/models/aggregator.py` 在 CPU 上建全零张量再拷到 GPU,以及 `vggt/layers/rope.py` 读 `int(positions.max())`。`s2_graph_bench.py` 在进程内打了补丁,仓库文件没改;RoPE 补丁在 CPU 上逐位等价。1 张和 10 张的测量作业 137951 在原机器排队未能开跑,09-27 已取消,要在新机器上重跑(第 8.2 节)。
-
-### 7.5 第一阶段的点能不能当几何对应(候选预检,作业 137766)
+### 7.5 第一阶段的点能不能当几何对应(原机器,作业 137766)
 
 - 数据 v1 subset64,模型 ckpt_70000。
-- 第一阶段预测的点投到输入图后,与真对应点的距离:有位姿时均值 2.81 像素、中位约 1.5 像素;无位姿时均值 7.39 像素、中位约 2.5 像素。
+- 第一阶段预测的点投到输入图后,与真对应点的距离:有位姿均值 2.81 像素、中位约 1.5;无位姿均值 7.39、中位约 2.5。
 - 加载器点图真值自带的半像素偏差,投到输入图后均值 0.53 像素(第 10 节)。
-- 结果文件只在原机器 `~/tmp/s2_probe/cand_70k.json`。
 
----
+### 7.6 实验:`S2P8fgdense_uni3t70k_b32t6_lr35_a21k26k`
 
-## 8. 还需要继续测试的内容
+**① 为什么做**:fg_dense 是满足速度判据的最简单结构,要看第二阶段能比第一阶段好多少。
 
-### 8.1 先定结构(挡着训练)
+**② 做了什么**:作业 6910007,4 × GH200,26k 步,14.2 小时。目标图块 = 含真值前景像素的 8×8 图块;掩码输入通道 = 真值目标掩码。G9 第 0 步通过;4k 安全线通过(LPIPS 比第 0 步低 0.0055,95% 区间 [−0.0064, −0.0045];无位姿低 0.0079)。
 
-| 候选 | 渲染器耗时(训练形状 / 10 张 / 1 张) | 要不要"再渲一遍 + 建表" | 说明 |
-|---|---|---|---|
-| 现结构(压缩 + 几何窗口) | 541 / 120.5 / 76.9 ms | 要 | 不满足速度判据 |
-| fg_dense | 125.5 / 42.2 / 40.9 ms | 不要 | 最简单 |
-| fg_static | 34.6 / 19.2 / 28.3 ms | 不要 | 场景侧不更新 |
-| fg_dual(用户 09-27 提) | 180.7 / 63.1 / 61.2 ms | 要 | 10 张时与第一阶段(66.8)持平 |
+**③ 结果**(对照:自己的第 0 步 = 第一阶段;格式 PSNR / LPIPS / 前景 PSNR / SSIM / abs_rel)
 
-表注:第一阶段渲染器同口径为 300–302 / 66.6–66.8 / 约 33–34 ms。fg_dual 那一行出自另一个作业(137899),同作业里 fg_dense 是 107.9 / 43.2 / 42.4 ms。
+| 步数 | 有位姿 | 无位姿 |
+|---|---|---|
+| 0 | 25.21 / 0.0925 / 21.29 / 0.8946 / 0.0104 | 24.07 / 0.1020 / 20.16 / 0.8816 / 0.0138 |
+| 2k | 28.20 / 0.0911 / 22.11 / 0.9154 / 0.0090 | 27.45 / 0.0993 / 21.47 / 0.9084 / 0.0110 |
+| 4k | 28.66 / 0.0868 / 22.37 / 0.9190 / 0.0085 | 28.01 / 0.0941 / 21.82 / 0.9132 / 0.0101 |
+| 6k | 28.90 / 0.0850 / 22.52 / 0.9209 / 0.0084 | 28.27 / 0.0919 / 21.98 / 0.9154 / 0.0099 |
+| 8k | 29.03 / 0.0825 / 22.58 / 0.9223 / 0.0083 | 28.44 / 0.0890 / 22.10 / 0.9171 / 0.0098 |
+| 10k | 29.21 / 0.0808 / 22.69 / 0.9236 / 0.0082 | 28.64 / 0.0870 / 22.25 / 0.9188 / 0.0095 |
+| 12k | 29.25 / 0.0802 / 22.71 / 0.9242 / 0.0082 | 28.72 / 0.0862 / 22.28 / 0.9196 / 0.0094 |
+| 14k | 29.34 / 0.0786 / 22.75 / 0.9250 / 0.0082 | 28.83 / 0.0843 / 22.35 / 0.9207 / 0.0095 |
+| 16k | 29.44 / 0.0778 / 22.87 / 0.9258 / 0.0081 | 28.93 / 0.0835 / 22.45 / 0.9216 / 0.0092 |
+| 18k | 29.52 / 0.0769 / 22.93 / 0.9265 / 0.0079 | 29.03 / 0.0825 / 22.55 / 0.9224 / 0.0091 |
+| 20k | 29.54 / 0.0759 / 22.94 / 0.9268 / 0.0080 | 29.07 / 0.0814 / 22.56 / 0.9229 / 0.0092 |
+| 22k | 29.64 / 0.0749 / 23.02 / 0.9277 / 0.0078 | 29.18 / 0.0801 / 22.65 / 0.9238 / 0.0089 |
+| 24k | 29.67 / 0.0742 / 23.04 / 0.9282 / 0.0077 | 29.22 / 0.0793 / 22.68 / 0.9243 / 0.0087 |
+| 26k | 29.70 / 0.0738 / 23.08 / 0.9282 / 0.0076 | 29.26 / 0.0788 / 22.72 / 0.9245 / 0.0085 |
 
-定下来之后要做:
+**判定**:数字上远超信号线,但第 7.8 节证明这个提升主要来自真值目标掩码,不能当作可部署的提升。
 
-1. 实现新结构。现在的原型只替换了注意力的计时路径,不能训练。
-2. 重跑 GPU 测试(至少起点等价),以及两组冒烟。
-3. 同节点重测 G8。
-4. 如果还想提速单张推理:再做 bf16 权重 + CUDA Graph(8.2)。
+### 7.7 实验:`S2P8fgdual_uni3t70k_b32t6_lr35_a21k26k`
 
-### 8.2 bf16 + CUDA Graph(渲 1 张、10 张)
+**① 为什么做**:fg_dense 之外再加一路几何窗口分支(门控相加),看值不值它多出的开销(训练步时 2.38 vs 1.77 秒;r1 渲 10 张 37.6 vs 24.6 ms)。
 
-- 原机器上的作业 137951 没开跑就取消了(09-27),在新机器上执行:
+**② 做了什么**:第一版(作业 6910008)每步 8.5–9 秒,定位并修好后(第 8 节第 5 条),用户选择用新代码从第 0 步重训(作业 6912794,4 卡)。G9 第 0 步通过;4k 安全线通过(有位姿 LPIPS −0.0052,95% 区间 [−0.0062, −0.0042];无位姿 −0.0073)。09-28 用户叫停,停时约 10.1k 步。
 
-```bash
-sbatch scripts_s2/s2_graph_bench.sbatch <任一第二阶段 ckpt> <输出前缀>
+**③ 结果**(对照:`S2P8fgdense_uni3t70k_b32t6_lr35_a21k26k` 同步数,PSNR / LPIPS)
+
+| 步数 | 有位姿:fg_dense → fg_dual | 无位姿:fg_dense → fg_dual |
+|---|---|---|
+| 2k | 28.202 / 0.09112 → 28.175 / 0.09183 | 27.450 / 0.09931 → 27.428 / 0.10028 |
+| 4k | 28.659 / 0.08684 → 28.648 / 0.08720 | 28.008 / 0.09408 → 27.994 / 0.09464 |
+| 6k | 28.898 / 0.08497 → 28.890 / 0.08532 | 28.267 / 0.09189 → 28.260 / 0.09234 |
+| 8k | 29.029 / 0.08254 → 29.063 / 0.08272 | 28.435 / 0.08905 → 28.466 / 0.08917 |
+| 10k | 29.206 / 0.08077 → 29.217 / 0.08099 | 28.642 / 0.08700 → 28.650 / 0.08721 |
+
+**判定**:所有差都在 PSNR ±0.03 dB、LPIPS 0.001 以内,远小于信号线;两条线到 10k 没有分开,所以"窗口分支有没有用"没有结论。两条线都依赖真值掩码(第 7.8 节)。
+
+### 7.8 调查:`S2P8fgdense_uni3t70k_b32t6_lr35_a21k26k` 的提升从哪来
+
+**① 为什么查**:用户 09-28 指出,对照网页上画面没有明显变好、边缘反而出现阶梯色块,怀疑数值提升来自"新视角的真值目标掩码"。
+
+**② 做了什么**(都在 GSO v1 subset64 上,用训练内验证存下的图和加载器给的真值掩码;掩码与图像逐像素对齐,差 0.00 个灰度级):
+
+1. 第一阶段的误差在轮廓附近怎么分布(作业 6913260,`s2_ring_analysis.py`)。
+2. 五个数据集的真值边缘是否锐利(作业 6919003,`s2_gt_edge_stats.py`):all287k、RnG 的两个训练集、GSO v1、GSO rv。
+3. 给第一阶段和 fg_dense 都贴上同一张真值 alpha 再比(作业 6913307,`s2_mask_composite.py`)。
+4. 按图块类别拆误差(作业 6920607,`s2_patch_split.py`)。
+5. 图块接缝诊断 + 标准指标按组统计(作业 6921690,`s2_edge_seams.py`)。
+
+**③ 结果**
+
+(a)**真值没问题,第一阶段的边缘是软的**:五个数据集的真值边缘都只有 1.3–2.5 个像素宽(256 分辨率、亮度 10%→90% 的过渡宽度),alpha 是直通(未预乘)的,远处背景是纯白。第一阶段画出来的边缘过渡宽 6.0 个像素(有位姿)/ 7.0(无位姿):离真值轮廓 1 个像素处,第一阶段的亮度只走完 56% 的路(真值 83%),2 个像素处 76%(真值 99.5%)。
+
+(b)**误差集中在轮廓附近**(有位姿,第 0 步):轮廓 ±4 像素内只占 6.1% 的像素,却占全图误差的 54%;整张图平移对齐后误差只降 2%,所以不是位置偏了,是边缘软。
+
+(c)**贴同一张真值 alpha 的对照**(14k,有位姿,PSNR / LPIPS):
+
+| 版本 | 原样 | 贴真值 alpha(软边) |
+|---|---|---|
+| 第一阶段(第 0 步) | 25.21 / 0.0924 | 27.33 / 0.0776 |
+| fg_dense 14k | 29.32 / 0.0786 | 29.34 / 0.0716 |
+
+只给第一阶段贴真值 alpha 就 +2.1 dB;两边都贴之后 fg_dense 只领先 +2.0 dB、LPIPS 0.006。与轮廓关系最小的物体内部(轮廓内侧 8 像素以外),误差(MSE)降 11%(有位姿)/ 15%(无位姿),这是目前对"真正精修"最保守的估计。
+
+(d)**按图块拆误差**(有位姿,第 0 步 → 14k 的 MSE):前景像素 0.0124 → 0.0079;"含前景的图块里的背景像素"(被重画)0.0437 → 0.0016;"离轮廓 8 像素内的纯背景图块"(没被重画,只经过重新训练的颜色头)0.0180 → 0.0063;远处背景 0.00018 → 0.00011。
+
+(e)**阶梯色块的机制与普遍程度**。第二阶段只重画含真值前景像素的 8×8 图块;第一阶段把物体画出了界、又落在这些图块外面的部分没人重画,就沿图块网格留成色块。用两个**自定义诊断量**(不是公认指标,只用来定位):
+
+```
+接缝 ⇔ J_b(pred) - J_in(pred) > tau  并且  J_b(pred) - J_b(GT) > tau
 ```
 
-- 这个作业需要一个第二阶段 ckpt 让残差不为 0,冒烟产出的 ckpt 就可以。
-- 它会先逐段检查主机同步:有段没过就只跑 A(fp32 原路径)和 B(bf16 权重)两段,并在 JSON 的 `sync_check` 里写出位置。
-- 要报的是:与原路径的一致性(最大绝对差、PSNR / LPIPS),以及第一、第二阶段各自的提速。
+| 符号 | 含义 |
+|---|---|
+| J_b | 跨边跳变:相邻两个图块之间那条 8 像素长的边,两侧紧贴的 8 对像素,每对取 RGB 三通道差的绝对值的平均,再对 8 对求平均。取值 0(两侧同色)到 1(黑挨着白) |
+| J_in | 边内侧跳变:两侧图块各往里一个像素的那 8 对像素,同样求平均,两侧取较大者;代表这里本来的颜色坡度 |
+| pred / GT | 预测图 / 真值图,像素值 0(黑)到 1(白) |
+| tau | 门槛 0.1,约 26/255 个灰度级,白底上这么大的跳变肉眼明显可见;是自定的 |
 
-### 8.3 其余没做完的
+白话:跨边的跳变比边内侧陡一截(排除"柔和边缘刚好穿过图块边界"),并且真值在这里没有这么大的跳变(排除真值本身的轮廓)。用 4 个已知答案的合成例子验证过这个定义。"残留色块像素" = 没被重画的图块里,预测不是白色(某通道比白色低 0.1 以上)的像素数;真值在这些位置都是白底。"第一阶段画出界的视角" = 第一阶段在没被重画的图块里画了 ≥ 256 个非白像素(4 个图块的面积)的视角:有位姿 16.2%(104 / 640 个视角),无位姿 23.3%(149 / 640)。
 
-1. **G6b**:关掉第二阶段,在全部 1030 个物体上复现第一阶段。门槛是 |ΔPSNR| ≤ 0.005 dB、|ΔLPIPS| ≤ 5e-5;参照值见 7.2。
-2. **G9**:开训后第 0 步对照 + 4k 步安全线(第 6.3 节)。
-3. **G10 / G11**:块 8、块 4 训满 26k 步;全量评测、配对重抽、四类区域。
-4. **GPU 测试在新机器上连跑几次**(第 5.2 节提到的一次不明失败)。
-5. **半像素**:第一阶段的底座修好并重训之后,第二阶段仓也要改加载器,并换成新的第一阶段 ckpt。在那之前,第二阶段按 09-26 的决定,把第一阶段的点当作像素中心的点来用(`model_s2/geometry.py` 顶部注释)。
-6. **真实数据**:第二阶段用了真值目标掩码(既用来挑 token,也作为输入通道),第一阶段没有用。所以结论只适用于"有目标掩码"的设定。真实数据要换成 SAM2 掩码另外测。
+接缝(同一视角、同一批边上,26k 相对第 0 步的变化;括号内为 14k):
+
+| 组 | 每视角接缝增加 | 多出 ≥ 3 条接缝的视角 | 残留色块像素:第 0 步 → 26k |
+|---|---|---|---|
+| 有位姿,画出界 | +4.05(+5.74) | 34.6%(47.1%) | 957 → 435 |
+| 有位姿,其余 | +0.03(+0.12) | 3.4%(4.3%) | 47 → 6 |
+| 无位姿,画出界 | +6.04(+8.03) | 38.9%(50.3%) | 1009 → 504 |
+| 无位姿,其余 | +0.05(+0.17) | 3.7%(6.1%) | 64 → 6 |
+
+表注:3 条接缝 ≈ 一段 24 像素长的阶梯,肉眼能看出,门槛自定。"其余"组里画出界的机制起不了作用,它的数就是这个诊断量的底噪。26k 时,重画 / 未重画交界的边里有 2.0%(有位姿)是接缝,是同一时刻重画–重画边(0.08%)的约 25 倍。
+
+标准指标按组(逐视角平均,第 0 步 → 14k → 26k):
+
+| 组(视角数) | PSNR | LPIPS | 26k 时 LPIPS 变差的视角 |
+|---|---|---|---|
+| 有位姿,画出界(104) | 20.22 → 27.27 → 28.14 | 0.1474 → 0.1191 → 0.1104 | 0% |
+| 有位姿,其余(536) | 26.18 → 29.74 → 30.00 | 0.0818 → 0.0707 → 0.0667 | 0% |
+| 无位姿,画出界(149) | 20.07 → 26.59 → 27.49 | 0.1502 → 0.1215 → 0.1127 | 0% |
+| 无位姿,其余(491) | 25.28 → 29.51 → 29.79 | 0.0874 → 0.0731 → 0.0686 | 0% |
+
+**判定**:
+1. 画出界的视角画面上更差(网格色块),标准指标却涨得最多(+7.9 dB,LPIPS −0.037),这 16% / 23% 的视角贡献了整体 PSNR 提升的 29% / 33%、LPIPS 提升的 32% / 38%。标准指标奖励的是"按真值轮廓切齐",看不到色块。
+2. 其余视角的边缘确实更干净,但同样依赖真值掩码(第 (c) 项)。
+3. 部署时没有新视角的真值掩码,所以这组数字高估了可部署的提升。这引出了第 7.9、7.10 节的两个实验。
+
+### 7.9 实验:`S2P8fgdense_s1sel1_s1mask_uni3t70k_b32t6_lr35_a21k26k`
+
+**① 为什么做**:去掉一切新视角真值信息,看第二阶段本身能把画面改好多少。
+
+**② 做了什么**:
+- **选图块**:第一阶段对该目标视角的渲染图里,含非白像素(某通道比白色低 0.1 以上)的 8×8 图块,再向外扩 1 圈(3×3 邻域)。第一阶段的渲染在第一遍前向里本来就有,不增加前向。这条规则用 1280 个视角预先估过(作业 6921690):真值前景像素落在选区外的比例 0.00%(有位姿、无位姿各只有 1 个视角漏了一点),每视角 345 个图块(真值规则 253 个,多 36%);不外扩时 64–69% 的视角会漏掉真值前景,外扩 2 圈则要 431 个图块。
+- **掩码输入通道**:第一阶段渲染图的非白像素掩码(逐像素)。
+- **开训前测速**(作业 6922991、6923212,同节点):
+
+| 选图块方式 | 视角数 | 每视角图块 | r0 纯 GPU | r1 纯 GPU / eager | 训练整步(中位) |
+|---|---|---|---|---|---|
+| 真值掩码(`S2P8fgdense_uni3t70k_b32t6_lr35_a21k26k`) | 1 / 10 | 261 / 285 | 9.0 / 71.9 ms | 5.4 / 32.4 ms;24.5 / 34.8 ms | 1.730 秒 |
+| 第一阶段渲染图 + 1 圈 | 1 / 10 | 373 / 398 | 9.0 / 71.9 ms | 5.5 / 34.8 ms;26.4 / 35.8 ms | 1.820 秒(+5.2%) |
+
+  图块多约 40%,r1 只慢 2–8%;10 张时 r1 是 r0 的 37%。训练每步 60% 的时间(约 1.04 秒)在冻结的第一阶段,所以只慢 5%。
+- 作业 6923274,4 卡,从第 0 步开训。G9 第 0 步通过(PSNR、前景 PSNR、abs_rel 与第一阶段参照逐位相同,LPIPS 最大差 2.8e-7);第 1 步的损失(−0.003897)与另外三个实验完全相同,数据顺序配对成立;4k 安全线通过(LPIPS −0.00046,95% 区间 [−0.00055, −0.00038])。训练中监控量 `s2_sel_gt_miss`(真值前景落在选区外的比例)为 0–0.02%。
+- 09-29 用户叫停于约 11.8k(最后验证点 10k),标为无效果。
+
+**③ 结果**(对照:自己的第 0 步;右列是同步数的 `S2P8fgdense_uni3t70k_b32t6_lr35_a21k26k`,PSNR / LPIPS)
+
+| 步数 | 有位姿 PSNR / LPIPS / 前景 PSNR | 无位姿 PSNR / LPIPS | 同步数真值掩码版(有位姿) |
+|---|---|---|---|
+| 0 | 25.213 / 0.09246 / 21.29 | 24.068 / 0.10202 | 25.213 / 0.09246 |
+| 2k | 25.199 / 0.09235 / 21.28 | 24.053 / 0.10194 | 28.202 / 0.09112 |
+| 4k | 25.198 / 0.09199 / 21.28 | 24.051 / 0.10161 | 28.659 / 0.08684 |
+| 6k | 25.188 / 0.09122 / 21.27 | 24.039 / 0.10084 | 28.898 / 0.08497 |
+| 8k | 25.192 / 0.09063 / 21.28 | 24.043 / 0.10040 | 29.029 / 0.08254 |
+| 10k | 25.205 / 0.08999 / 21.28 | 24.061 / 0.09981 | 29.206 / 0.08077 |
+
+**判定**:10k 时逐物体配对,有位姿 LPIPS −0.0025(95% 区间 [−0.0027, −0.0022])、PSNR −0.008 dB;无位姿 LPIPS −0.0022、PSNR −0.008 dB。LPIPS 的改进是真实的(区间很窄)但小于 0.003 的信号线,PSNR、前景 PSNR、深度都没变。画面:与第 0 步相比,只有 7.3% 的像素变化超过 2 个灰度级、0.57% 超过 10 个,全图 MSE 0.00479 → 0.00481;第 18 号物体(Ecoforms 花盆)有位姿第 0 视角的轮廓仍是第一阶段那个偏大的轮廓,没有网格色块。
+
+### 7.10 实验:`S2P8fgdense_s1sel1_nomask_uni3t70k_b32t6_lr35_a21k26k`
+
+**① 为什么做**:与第 7.9 节配对,回答"把第一阶段的非白掩码显式喂给第二阶段有没有用"。
+
+**② 做了什么**:与第 7.9 节相同,只是掩码输入通道恒为 0。做成"恒为 0"而不是删掉通道:输入是 0,这一路的权重收不到梯度(GPU 单测核对过梯度恰为 0),效果等于没有这个通道,而参数、初始化随机数、数据顺序与第 7.9 节完全相同。作业 6923275,4 卡;G9 通过(LPIPS 最大差 3.5e-7);第 1 步损失与其余三个实验相同;4k 安全线通过(LPIPS −0.00045,[−0.00053, −0.00038])。09-29 叫停于约 11.8k。
+
+**③ 结果**(对照:自己的第 0 步,和第 7.9 节同步数)
+
+| 步数 | 有位姿 PSNR / LPIPS | 无位姿 PSNR / LPIPS | 第 7.9 节同步数(有位姿) |
+|---|---|---|---|
+| 0 | 25.213 / 0.09246 | 24.068 / 0.10202 | 25.213 / 0.09246 |
+| 2k | 25.199 / 0.09237 | 24.053 / 0.10195 | 25.199 / 0.09235 |
+| 4k | 25.198 / 0.09200 | 24.051 / 0.10159 | 25.198 / 0.09199 |
+| 6k | 25.188 / 0.09126 | 24.039 / 0.10093 | 25.188 / 0.09122 |
+| 8k | 25.194 / 0.09061 | 24.045 / 0.10035 | 25.192 / 0.09063 |
+| 10k | 25.206 / 0.09000 | 24.062 / 0.09986 | 25.205 / 0.08999 |
+
+**判定**:相对第 0 步与第 7.9 节相同(有位姿 LPIPS −0.0025,[−0.0027, −0.0022];PSNR −0.008 dB)。10k 时第 7.9 节减本节,逐物体配对:有位姿 PSNR −0.0004 ± 0.0006 dB、LPIPS −0.00001 ± 0.00004;无位姿 PSNR −0.0009 ± 0.0006、LPIPS −0.00005 ± 0.00005(± 为标准误)。两条线没有分开,"掩码通道有没有用"无法下结论。两条一起标为无效果。
+
+### 7.11 审计:块 8 的 r1 到底学到了什么
+
+**① 为什么查**:第 7.9、7.10 节几乎没提升,要分清"r1 根本没在训练"还是"训练了但学不到东西"。这决定下一步是修训练还是改设计。
+
+**② 做了什么**(作业 6932578,只读,`s2_residual_audit.py`):审计第 7.9、7.10 节的 ckpt 10k / 11k,以 `S2P8fgdense_uni3t70k_b32t6_lr35_a21k26k` ckpt 21k / 26k 作对照(它的 10k ckpt 已被剪掉;它在 10k 的验证就已 +4.0 dB,所以对照不受步数影响)。
+
+- **权重**:每组参数离起点走了多远。复制自第一阶段的部分以第一阶段权重为起点(精确已知);输出层 Lin_m 起点是 0。拿两把尺子量:`sum_lr = Σ_t lr_t`(每一步都朝同一方向时,每个参数最多能走多远;10k 时 0.33)和 `lr * sqrt(T)`(每一步方向随机时能走多远;10k 时 0.0035)。lr_t 是第 t 步的学习率,T 是已走的步数。
+- **功能**:16 个 GSO 物体 × 10 个视角(有位姿)上,计算残差比,并把"残差开 / 关"和"第一阶段的头 / 训练后的头"两两组合各渲染一次。
+
+```
+r_m = RMS(Lin_m(t2)) / RMS(T1_m)
+```
+
+| 符号 | 含义 |
+|---|---|
+| Lin_m(t2) | 第二阶段在第 m 层加到第一阶段 token 上的修正量(残差),只算被重画的图块 |
+| T1_m | 第一阶段第 m 层的 token |
+| RMS | 均方根,即典型大小 |
+| m | 2、5、8、11;第 11 层同时进颜色头和点图头,2、5、8 层只进点图头 |
+
+r_m = 0 表示没有修正,0.5 表示修正量有原 token 的一半大。自检:"第一阶段的头 + 残差关"与第一阶段的渲染逐位相同,"训练后的头 + 残差开"与模型自己的前向逐位相同。
+
+**③ 结果**
+
+| 量 | `S2P8fgdense_s1sel1_nomask_uni3t70k_b32t6_lr35_a21k26k` ckpt_10000 | `S2P8fgdense_uni3t70k_b32t6_lr35_a21k26k` ckpt_21000 |
+|---|---|---|
+| Lin_m 的 RMS 位移 / (lr·√T) | 0.66 | 0.76 |
+| 复制来的 12 个块:RMS 位移 / (lr·√T) | 0.52 | 0.77 |
+| 颜色头:RMS 位移 / (lr·√T)(相对第一阶段改变) | 0.42(1.9%) | 1.87(12%) |
+| 点图头:RMS 位移 / (lr·√T)(相对第一阶段改变) | 0.53(15%) | 0.74(30%) |
+| 残差比 r_2 / r_5 / r_8 / r_11 | 0.34 / 0.071 / 0.023 / 0.054 | 0.41 / 0.061 / 0.046 / 0.46 |
+| 只开残差(第一阶段的头):PSNR / LPIPS | 25.468 / 0.08552 | 23.488 / 0.11841 |
+| 只换训练后的头(残差关) | 25.475 / 0.08744 | 21.982 / 0.13919 |
+| 两者都开(= 模型本身) | 25.470 / 0.08465 | 30.868 / 0.06654 |
+| 两者都开时画面平均变化(灰度级,对第一阶段) | 0.34 | 2.5 |
+
+表注:16 个物体上第一阶段为 PSNR 25.478 / LPIPS 0.08739。`S2P8fgdense_s1sel1_s1mask_uni3t70k_b32t6_lr35_a21k26k` 的数与 nomask 相同(差在 ±0.01 以内)。没有任何一步被跳过:梯度范数中位数 2.8,裁剪到 1.0;跳过门槛是 1.0 × 5000。
+
+**判定**:
+1. r1 在训练:参数以接近随机游走的速度在动,和真值掩码版同一量级;"没在训练"可以排除。参数移动量本身分不出学没学到东西(两者都只有 sum_lr 的 0.5% 左右)。
+2. 学到的修正量小一个数量级:进颜色头那层,残差只有真值掩码版的约 1/9(0.054 对 0.46);画面平均只变 0.34 个灰度级;那点 LPIPS 改进(−0.0027)里约 70% 来自残差本身,只换头没有作用。
+3. 真值掩码版的提升是残差和颜色头一起重学出来的:单开残差或单换头画面都比第一阶段差,合在一起才 +5.4 dB。
+4. 点图头的权重相对第一阶段改了 15%:只开残差时点的位置平均变 2.7%,只换头时 7.2%,两者都开时 5.2%;但 abs_rel 没变好(0.01044 → 0.01041)。
+5. 为什么学得少,现有数据分不开两种解释,见第 9.1 节。
+
+### 7.12 对照网页
+
+`S2P8fgdense_uni3t70k_b32t6_lr35_a21k26k` 每 2k 一个 ckpt(0–26k)与第一阶段的逐视角对照,可切换"渲染图 / 与真值的误差 / 相对第 0 步的变化",可叠加"重画图块边界(蓝线)+ 真值轮廓(绿线)",附图块接缝统计。展示 30 个物体:按 14k 时有位姿 LPIPS 变化挑的提升最大、中位附近、提升最小各 8 个,加接缝最多的 6 个。地址 <https://claude.ai/artifact/1Hbf5aqvd95n5PcyEb3rFW>(claude.ai 私有页面,属于用户账号)。
 
 ---
 
-## 9. 之前定下、后续要做的消融 / 备选 / 暂缓
+## 8. 遇到的问题与处理
+
+| # | 问题 | 原因 | 处理 / 现状 |
+|---|---|---|---|
+| 1 | 原结构 r1 比 r0 慢(10 张时 121.1 vs 72.3 ms) | 结构:每张目标图保留一份场景 token、逐 token 压缩 | 换结构,选了 fg_dense / fg_dual(第 7.3、7.4 节) |
+| 2 | 第一阶段路径在不同进程里评测,个别视角 LPIPS 差 1 个 bf16 步长,深度图 PNG 不同,RGB 完全相同 | `cudnn.benchmark` 每个进程自己挑卷积算法(作业 6906909:关掉后 64 个物体逐位相同;打开时 7–9 个视角的 LPIPS 不同) | 用户选方案 B:保留 benchmark,G9 的 LPIPS 门槛放宽到 1 个 bf16 步长;加了 `CUDNN_BENCHMARK=0` 开关供诊断 |
+| 3 | 两个实验的 G9 第 0 步起初都不过(LPIPS 差 1–2 个 bf16 步长,abs_rel 差约 3%),但 RGB 完全相同 | 训练内验证按 fp32 算指标,`inference.py` 在 bf16 autocast 下算 | `inference.metrics_autocast=false` + fp32 参照(作业 6910144),之后全部通过(LPIPS 最大差 ≤ 3.5e-7) |
+| 4 | fg_dual 冒烟触发 FlexAttention 重编译上限(64 次) | 窗口宽度随 batch 变 | 改成固定宽度(冒烟 6909971 通过) |
+| 5 | fg_dual 每步 8.5–9 秒 | 窗口打包时从一个共享零行做 gather,其反向(`IndexBackward`)每步 5.9 秒,约占 69% | 改成 `index_copy` 写入(`_scatter_pad`),2.38 秒/步;在真实 ckpt 上对照:前向逐位相同,梯度差在同代码两次运行的差之内(作业 6912545)。旧代码的 run(3160 步)作废,用户选择从第 0 步重训 |
+| 6 | **续训不恢复数据位置** | 续训时数据迭代器从当前 epoch 开头重新读(一个 epoch 约 9000 步),已读过的数据重放;两条配对的线若在不同步数续训,数据顺序不再相同 | **没修**。块 8 的实验都在 24 小时内跑完或被停,没受影响;块 4 很可能超过 24 小时,开训前要改成续训时跳过本 epoch 已读的 batch |
+| 7 | **真值目标掩码泄漏**(设计问题) | 第二阶段用新视角的真值掩码挑重画的图块,并把它作为输入通道;部署时拿不到 | 第 7.8 节确认;第 7.9、7.10 节换成第一阶段渲染图选图块,无效果 |
+| 8 | 分阶段计时工具早期的数不对 | profiler 设备事件求和会重复计数;旧工具又漏掉约一半 kernel;块 4 的头每次调用都把 parent index 从 CPU 拷到 GPU,不能录 CUDA Graph | 改成"按算子遍历数 kernel + 纯 GPU 时间取 CUDA Graph 重放";块 4 的头在计时中保持 eager |
+| 9 | 原 README 的三条速度结论不对 | 同上 | 已在第 7.3 节修正 |
+| 10 | 对照网页三个面板不对齐;缩小后的贴图串进相邻视角的颜色 | 网格把面板拉伸;对整条 10 视角长图做 LANCZOS 缩放 | 子网格对齐;每个视角单独处理、用原生 256 像素;发布时用带版本的文件名,数据和图同时切换 |
+| 11 | 接缝诊断第一版把第一阶段的柔和边缘算成接缝(第一阶段反而"接缝更多") | 只比了"跨边跳变比真值大",柔和边缘相邻像素差约 0.16 也过线 | 加"跨边比边内侧陡"的条件,用 4 个已知答案的例子验证 |
+| 12 | 测速脚本漏测了第二个配置 | 每腿结果按文件名第一段命名,两个配置都叫 `S2P8fgdense`,第二个被当成"已测过" | 改用 `exp_name` 命名,重测(作业 6923212) |
+| 13 | 训练看门狗误报 | 失败特征里的"API key"匹配到了正常提示"W&B API key is configured" | 只匹配真正的密钥报错 |
+| 14 | 新加的 GPU 单测第一次 3 项失败 | 断言写错:输出层 Lin_m 初始为 0,第 1 步时它上游所有参数(包括掩码通道)的梯度必然为 0 | 改到第 2 步检查,4 项全过(作业 6923024) |
+| 15 | 原 README 写的 `s2_compare.py --gate` 不存在 | 从未实现 | 写了 `s2_pairdiff.py` |
+| 16 | 全量评测(G6b)跑不了 | Isambard 上没有 GSO v2 全量数据 | 未做;`s2_fulleval.sbatch` 找不到数据会直接停下 |
+| 17 | 训练日志几乎每步都有"梯度范数 > 2.0"警告 | 梯度范数中位数 2.8(p99 4.4,最大 5.5),每步都被裁剪到 1.0 | 不是 bug:没有一步被跳过,参数更新步数等于前向步数。三个 fg_dense 实验都如此,记录在案 |
+| 18 | Isambard 计算额度快用完,10-15 回收 | — | 第 11 节 |
+| 19 | 单测作业的 5 分钟守护报"失败特征",但测试全过 | `test_s2_train_contract` 故意写坏 ckpt(日志里有 Traceback),`test_best_effort_write` 模拟磁盘写满("No space left on device") | 无害;判定看 `Ran … OK` 和退出码 |
+
+---
+
+## 9. 后续规划
+
+### 9.1 先弄清"r1 为什么学得少"(建议最先做)
+
+两种解释,现有数据分不开:
+
+| 解释 | 能区分它的实验 | 成本 | 怎么判 |
+|---|---|---|---|
+| A. 没什么可学:第二阶段看到的输入(场景 token、射线)和第一阶段完全一样,没有新信息 | **过拟合测试**:fg_dense、第一阶段选图块、掩码通道恒 0,在固定的少量训练物体(例如 32 个)上反复训 r1,看训练集上的 PSNR / LPIPS 能比第一阶段好多少 | 1 卡约 2 小时 | 连记住的数据都明显超不过第一阶段 → A:这个结构从这些输入里提不出更多东西 |
+| B. 学得太慢:学习率或步数不够,残差来不及长大 | **学习率探针**:两条配对的线,1 倍 / 3 倍学习率,同样的数据顺序,看验证指标谁变好得快 | 原计划从 `S2P8fgdense_s1sel1_nomask_uni3t70k_b32t6_lr35_a21k26k` ckpt_10000 续训 3000 步(约 12 GPU·h);该 ckpt 按 10-13 决定不备份,换机器后要从第 0 步起,约多 23 GPU·h | 3 倍学习率明显更快变好 → B |
+
+结论会影响块 4:如果是 A,把图块切细也同样没有新信息可用;如果是 B,块 4 的学习率也要一起定。
+
+### 9.2 块 4 的两个实验(用户 09-29 要求先不动手)
+
+两个实验都在 256 分辨率下(块 4 = 每视角 64×64 个 4×4 图块),训满 26k(G11)。
+
+**现在的块 4 代码**(它就是 09-26 定的"主方案初始化"):
+
+| 部件 | 现在的块 4 | 第 0 步输出是否等于第一阶段 |
+|---|---|---|
+| 目标切块层(4×4,7 通道) | 新建,正态 std 0.02 | 不影响输出 |
+| 注入层 `inj_x` / `inj_rec`(12 块 × 2) | 截断正态 std 0.02 | 不影响输出 |
+| 输出层 Lin_m | 零初始化 | 是(残差为 0) |
+| 颜色头 | 新建 LayerNorm + Linear 768→48,权重为 0 | **否**:第 0 步整张图是 0.5 灰 |
+| 点图头 DPT | 复制第一阶段,换 4 个随机初始化的新缩放层 | **否** |
+| 结构 / 选图块 | 原结构 + 真值掩码 | — |
+
+**实验 1:块 4 + 主方案初始化**,要改:
+1. 结构从原结构换成 fg_dense(原结构连块 8 都不满足速度判据)。
+2. 选图块(待定,建议):按 8×8 粒度用第一阶段渲染图选(非白图块 + 1 圈,与第 7.10 节完全相同的区域),选中的 8×8 图块全部切成 4×4 重画;掩码通道恒 0。这样"块 4 对块 8"只差图块大小。改动是选图块时用 8 而不是 4。GSO 上每视角约 1400 个 4×4 图块。
+3. 新配置 `S2P4fgdense_s1sel1_nomask_uni3t70k_b32t6_lr35_a21k26k`(块 8 nomask 配置 + `target_patch: 4`、`pad_bucket: 256`)。
+4. 初始化不动。后果:第 0 步是灰图,G9 第 0 步检查不适用,4k 只查训练健康,如实报告离第一阶段还有多远。
+
+**实验 2:块 4 + "开局等于第一阶段"初始化**,在实验 1 基础上再改:
+1. 4×4 切块层由第一阶段的 8×8 切块层换算:FlexiViT 的伪逆缩放(timm 1.0.25 的 `resample_patch_embed`),一个 4×4 图块的 token = 第一阶段 8×8 切块层作用在"这个图块放大 2 倍"上的 token;掩码通道权重置 0。
+2. 颜色头:原路(4 个子图块 token 做 2×2 平均 → 第一阶段颜色头 → 8×8×3 → 取子图块所在的 4×4 象限)+ 新路(子图块 token → LayerNorm + Linear 768→48,零初始化),在 sigmoid 前相加。README 原消融条目只写了 DPT;不改颜色头,开局就是灰图。
+3. DPT 的 4 路:原路(64×64 token 平均到 32×32,走第一阶段原来的投影和缩放)+ 新路(64×64 token 走新的投影和缩放,最后一层零初始化),在各层级特征图上相加。
+4. 注入层 `inj_x` / `inj_rec` 全部零初始化。
+5. 2×2 平均写成 `((a + b) + (c + d)) / 4`:开局 4 个子图块 token 相同,这样写逐位不变,第 0 步能逐位等于第一阶段;直接用平均池化可能多舍入 1 位。
+6. 配置开关与实验名 `S2P4fgdense_s1sel1_nomask_s1init_uni3t70k_b32t6_lr35_a21k26k`。
+
+**两个实验共同要做**:CPU / GPU 单测(实验 2 第 0 步逐位等于第一阶段;切块层换算对"显式放大 2 倍再用 8×8 卷积"的独立参照;每个参数有梯度);同节点测速(r0 / r1 在 1 / 10 张,训练整步,以块 8 nomask 配置作锚点);续训时恢复数据位置(第 8 节第 6 条);两条各 4 卡训练。
+
+**待用户拍板的 4 点**:
+1. 选图块和掩码通道(建议如上;备选是真值掩码,但那样的数字是虚高的)。
+2. 实验 2 的颜色头是否也按"2×2 平均 + 原路 + 零初始化新路"处理(建议是)。
+3. 切块层换算方法(建议伪逆缩放;备选是把 8×8 核的 4 个 4×4 子块直接相加)。
+4. 测速若显示块 4 的 r1 在 10 张时不比 r0 快,是否照样训(建议先停下报告)。参考:原型测速里块 4 fg_dense 的 r1(真值图块)渲 10 张纯 GPU 39.9 ms,r0 72.4 ms;第一阶段选图块会多约 40% 图块,需要实测。
+
+### 9.3 其他待做
+
+1. fg_static:最快的候选(r1 渲 10 张 6.7 ms),一直没有实现成可训练的代码。
+2. G6b:全量 1030 个物体复现第一阶段,需要 GSO v2;门槛 |ΔPSNR| ≤ 0.005 dB、|ΔLPIPS| ≤ 5e-5,参照见第 7.1 节。
+3. 半像素:第一阶段底座修好并重训后,第二阶段要换加载器和第一阶段 ckpt(第 10 节)。
+4. 真实数据:要用 SAM2 掩码。按第 7.8 节的结论,任何依赖新视角掩码的设计都要先回答"部署时掩码从哪来"。
+5. fg_dual 对 fg_dense:到 10k 没分开,没有结论。
+6. "用预测掩码评测已训好的真值掩码版"(09-28 提的方案 C)没做;那个 ckpt 按 10-13 决定不备份。
+
+### 9.4 之前定下的消融 / 备选 / 暂缓(状态更新)
 
 **原则(用户 09-26)**:主方案选最可能提升效果的做法,不为"消融干净"去选方案。新部件按正常训练的标准设置初始化;"开局输出等于第一阶段"的做法放在消融里。
 
-**消融**
+**消融**:
+1. 开局等于第一阶段(块 4):→ 第 9.2 节实验 2,待拍板。注:训过的块 8 各实验开局都逐位等于第一阶段(Lin_m 零初始化、头是第一阶段的拷贝),"开局不等于第一阶段"一侧在块 8 上没测过。
+2. 块 4 场景侧也切细:插值 VGGT 特征,再加零初始化的像素项和射线项。未做。
+3. 加场景侧稀疏自注意力,或照 LSRM 在末尾加 3 个单向附加块。未做。
 
-1. **开局等于第一阶段**:4×4 切块层用 8×8 切块层换算来初始化;DPT 每一路走"2×2 平均后接原路 + 零初始化的新路";注入层零初始化。
-2. **块 4 场景侧也切细**:插值 VGGT 特征,再加零初始化的像素项和射线项。
-3. **加场景侧稀疏自注意力**,或者照 LSRM 在末尾加 3 个单向附加块。
+**备选**:逐像素残差头 + StereoNet 式的彩色图引导小网络;第二阶段的场景 token 加上 DINOv2 / v3 特征;更省的 DPT 改法 D(32 GMAC)、F / G(通道减半,25.5 / 10.3 GMAC);DPT 多输出 3 个颜色通道。都未做。
 
-**备选**
-
-- 逐像素残差头 + StereoNet 式的彩色图引导小网络。
-- 第二阶段的场景 token 加上 DINOv2 / v3 特征。
-- 更省的 DPT 改法:D(32 GMAC),以及 F、G(通道减半,25.5 / 10.3 GMAC)。块 4 现在的 DPT 约 93 GMAC/张,块 8 约 78。
-- DPT 多输出 3 个颜色通道。
-
-**暂缓**
-
-- 匹配头版本(A 组):用 VGGT TrackHead 求对应。7.4 节的开销估算显示它更贵。
-- 块 2。
-- 提高分辨率。
-- 按层注入的 ② 方案。
-- "第一阶段多训"对照:从 `PLN2uni3t_all287k_b32t6_fp32lr35_const` ckpt_76000 再退火 1 万步。这个 ckpt 只在原机器上(第 11 节)。
-- FlexAttention 的 FA4 后端,以及 cudnn.flex_attention。
-
-**结构候选**:fg_dense、fg_static、fg_dual 属于 8.1 节的结构选择,不算消融。
+**暂缓**:匹配头版本(VGGT TrackHead,已测过更贵);块 2;提高分辨率;按层注入的 ② 方案;"第一阶段多训"对照(从 `PLN2uni3t_all287k_b32t6_fp32lr35_const` ckpt_76000 再退火 1 万步,该 ckpt 只在原机器);FlexAttention 的 FA4 后端与 cudnn.flex_attention。
 
 ---
 
 ## 10. 已知问题与注意事项
 
-- **第一阶段点图偏半个像素**。加载器 `data/dataset_objaverse.py:137-138` 用 `x - W // 2`(像素左上角),模型的射线用 `x + 0.5 - cx`(像素中心)。所以点图真值在 x、y 方向各偏 0.5 像素,ckpt_70000 就是按这个偏的真值训出来的。
-  - 新视角合成、深度 abs_rel、位姿都不受影响。
-  - 修法与验收见 `docs/half_pixel_pointmap_bug.md`、`tools_s2/check_pointmap_on_ray.py`:两行各加 0.5,**不要把 cx 改成 127.5**。
-  - 本仓的加载器按 09-26 的决定还没改。
-- **深度与前景掩码的最近邻缩放比 RGB 多偏 0.25 像素**(512→256)。这是另一个独立问题,建议暂不改,见同一文档第 10 节。
-- **冻结的第一阶段不在模块树里**(用 `object.__setattr__` 挂上),所以不进 state_dict、优化器和 DDP。第二阶段的 ckpt 只有可训练参数,载入时仍然需要第一阶段 ckpt。
-- **第一阶段每步用 `torch.no_grad` 现算,不能用 `inference_mode`**:它的输出 token 要进可训练层。
-- **FlexAttention**:重编译上限设成 64。编译缓存放节点本地盘。开头几步因为编译会慢。
-- 配置里的防呆设置不要改:`unfreeze_rae_decoder_at: 1.05`(默认 0.2 会崩)、`exclude_bg_frac: 0.0`、`resume_ckpt: ''`。若误用第一阶段配置里的续训键,会把第一阶段整包当成续训点,从 70000 步起跑。
-- 两个仓外的只读引用:`training.api_key_path`(第 4 节);`tools_s2/s2_trackhead_cost.py` 会导入原版 VGGT 仓。
+- **第一阶段点图偏半个像素**:加载器 `data/dataset_objaverse.py:137-138` 用 `x - W // 2`(像素左上角),模型的射线用 `x + 0.5 - cx`(像素中心),点图真值在 x、y 各偏 0.5 像素,ckpt_70000 就是按这个训的。新视角合成、深度 abs_rel、位姿不受影响。修法与验收见 `docs/half_pixel_pointmap_bug.md`、`tools_s2/check_pointmap_on_ray.py`(两行各加 0.5,**不要把 cx 改成 127.5**)。本仓按 09-26 的决定没改。
+- **深度与前景掩码的最近邻缩放比 RGB 多偏 0.25 像素**(512→256),建议暂不改,见同一文档。
+- **冻结的第一阶段不在模块树里**(`object.__setattr__` 挂上),不进 state_dict、优化器和 DDP;第二阶段 ckpt 只有可训练参数,载入时仍需第一阶段 ckpt。第一阶段每步用 `torch.no_grad` 现算,不能用 `inference_mode`(输出 token 要进可训练层)。
+- **零初始化的输出层 Lin_m**:第 0 步输出逐位等于第一阶段,但第 1 步时它上游所有参数的梯度恰为 0,第 2 步起才有(写测试时注意)。
+- **G9 的两个前提**:LPIPS 门槛是 1 个 bf16 步长(cudnn.benchmark 开着);参照必须是 fp32 指标(第 8 节第 2、3 条)。
+- **续训不恢复数据位置**(第 8 节第 6 条)。
+- **梯度裁剪每步都在起作用**(第 8 节第 17 条)。
+- **FlexAttention**:重编译上限 64;编译缓存放节点本地盘;开头几步因为编译会慢;窗口宽度必须固定。
+- **配置里的防呆设置不要改**:`unfreeze_rae_decoder_at: 1.05`(默认 0.2 会崩)、`exclude_bg_frac: 0.0`、`resume_ckpt: ''`、`weight_camera: 0`、`use_bf16: false`。误用第一阶段配置里的续训键,会把第一阶段整包当成续训点。
+- **用第一阶段渲染图选图块**只支持 fg_dense(current / fg_dual 的窗口和可见性表还读真值目标掩码),其他结构会直接报错。
+- **训练里 `target_alpha_mask` 仍传给损失函数**,但损失是全图的(`exclude_bg=False`),它不起作用;评测的前景 PSNR 用真值掩码只是为了算指标。
+- 仓外的只读引用:`training.api_key_path`;`tools_s2/s2_trackhead_cost.py` 会导入原版 VGGT 仓。
 
 ---
 
-## 11. 用到的 checkpoints 一览
+## 11. 备份状态与 checkpoints 一览
 
-| 用途 | 实验名 / 文件 | 位置 | 新机器上需要吗 |
+**10-13 的决定**:只备份代码和本 README;第二阶段的 checkpoint 不备份(所有结论都已变成本文里的数字,唯一不可替代的第一阶段权重在 HF 上)。
+
+| 内容 | 位置 | 回收(10-15)后 |
+|---|---|---|
+| 代码、配置、脚本、测试、本 README | GitHub `gallenszl/Largenvs_ui3t_twostage`(公开仓库) | 保留 |
+| 第一阶段 `PLN2uni3t_all287k_b32t6_fp32lr35_wsd60k_a10k` ckpt_70000 | HF `szlgallen/RAE_backup_checkpoints`(第 4.1 节) | 保留 |
+| 训练曲线 | W&B `szlgallen-peking-university/PLN2_lagernvs`:`e1h0j0y7`、`74pqzjqw`、`2bk04yq4`、`jb8wrpq1`、`o0a1q0r9`(对应关系见第 0.1 节) | 保留 |
+| 对照网页 | claude.ai(第 7.12 节) | 保留 |
+| 第二阶段 checkpoint | Isambard `/scratch/u6ga/zhelun.u6ga/S2_experiments/checkpoints/<实验名>/`:`S2P8fgdense_uni3t70k_b32t6_lr35_a21k26k` 21k / 25k / 26k;`S2P8fgdual_uni3t70k_b32t6_lr35_a21k26k` 9k / 10k;两个第一阶段选图块实验各 10k / 11k;fg_dual 旧代码 2k / 3k | 丢失(不备份) |
+| 冒烟 checkpoint | 同盘 `S2_experiments/SMOKE/` | 丢失 |
+| 训练内验证的渲染图、逐物体指标、分析结果 JSON、测速 JSON | 同盘 `S2_experiments/checkpoints/*/eval_iter_*`、`evaluation/`、`bench/` | 丢失;关键数字已抄进第 7 节 |
+| 作业日志与作业登记表 | 仓内 `slurm_logs/`(不进 git) | 丢失 |
+
+重做任何实验都可以从 HF 上的第一阶段权重和本仓代码出发;按第 6.5 节的实测,块 8 fg_dense 训满 26k 约 57 GPU·h。
+
+**其他用到的 checkpoints / 权重**:
+
+| 用途 | 实验名 / 文件 | 位置 | 换机器时需要吗 |
 |---|---|---|---|
-| 冻结的第一阶段 | `PLN2uni3t_all287k_b32t6_fp32lr35_wsd60k_a10k` ckpt_70000 | HF `szlgallen/RAE_backup_checkpoints`(第 3.1 节);原机器旧盘 | **需要**,从 HF 下载 |
-| VGGT-1B 预训练 | `facebook/VGGT-1B` 的 `model.pt` | `$TORCH_HOME/hub/checkpoints/` | 需要(新机器已有) |
-| 感知损失、LPIPS | `imagenet-vgg-verydeep-19.mat`、`vgg16-397923af.pth`、`vgg19-dcbb9e9d.pth` | `metric_checkpoint/`、`$TORCH_HOME/hub/checkpoints/` | 需要(新机器已有) |
+| VGGT-1B 预训练 | `facebook/VGGT-1B` 的 `model.pt` | `$TORCH_HOME/hub/checkpoints/` | 需要(构造模型时读,第 4.2 节) |
+| 感知损失、LPIPS | `imagenet-vgg-verydeep-19.mat`、`vgg16-397923af.pth`、`vgg19-dcbb9e9d.pth` | `metric_checkpoint/`、`$TORCH_HOME/hub/checkpoints/` | 需要 |
 | 第一阶段的退火起点;第 12 节冒烟臂的续训起点 | `PLN2uni3t_all287k_b32t6_fp32lr35_const` ckpt_60000 | HF 同仓 `moe_experiments/checkpoints/PLN2uni3t_all287k_b32t6_fp32lr35_const/ckpt_0000000000060000.pt`(16,755,969,541 字节,sha256 `d8a8a45d4998c6e05b4e769ad19d89eeeb8da267594e9cba0fe2638e30ad101b`) | **第 12 节的冒烟臂需要** |
 | "第一阶段多训"对照的起点(暂缓) | `PLN2uni3t_all287k_b32t6_fp32lr35_const` ckpt_76000 | 只在原机器 | 做这个对照时才需要 |
-| 第一阶段恒定学习率主干的中间点 | 同上 ckpt 16k / 26k / 36k / 46k / 56k | HF 同仓 `moe_experiments/checkpoints/PLN2uni3t_all287k_b32t6_fp32lr35_const/` | 不需要 |
-| 第二阶段冒烟 ckpt(只存可训练参数,各约 3 GB) | `S2P8_…_SMOKE_1378xx`、`S2P4_…_SMOKE_1378xx` 的 ckpt_60 / ckpt_90 | 原机器旧盘 `…/moe_experiments/SMOKE/` | 不需要。新机器冒烟会自己生成;8.2 节的测速可以直接用新冒烟的 ckpt |
-| 第二阶段正式训练 | 没有 | 块 8 训练 137864 从未开跑 | — |
+| 第一阶段恒定学习率主干的中间点 | 同上 ckpt 16k / 26k / 36k / 46k / 56k | HF 同仓 `moe_experiments/checkpoints/PLN2uni3t_all287k_b32t6_fp32lr35_const/` | 第二阶段不需要;第 12 节的 36k 对比用了 36k |
+| 第二阶段冒烟 ckpt(原机器) | `S2P8_…_SMOKE_1378xx`、`S2P4_…_SMOKE_1378xx` 的 ckpt_60 / ckpt_90 | 原机器旧盘 `…/moe_experiments/SMOKE/` | 不需要,冒烟会自己生成 |
 
 ---
 

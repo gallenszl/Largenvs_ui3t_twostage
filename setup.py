@@ -103,8 +103,9 @@ def init_distributed(seed=42):
     np.random.seed(process_seed)
     random.seed(process_seed)
     
-    # Optional: For better performance
-    torch.backends.cudnn.benchmark = True
+    # Optional: For better performance. CUDNN_BENCHMARK=0 turns it off (per-process timed algorithm choice is a
+    # source of bf16 rounding differences between processes, e.g. LPIPS / DPT convolutions)
+    torch.backends.cudnn.benchmark = os.environ.get("CUDNN_BENCHMARK", "1") != "0"
     
     return edict({
         'local_rank': local_rank,

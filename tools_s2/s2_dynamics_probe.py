@@ -31,7 +31,7 @@ def group_of(name, p4):
         return "Lin_m (zero init)"
     if ".inj_" in name:
         return "injection"
-    if ".gate." in name:
+    if ".gate." in name or ".rgate." in name:
         return "gate"
     if re.search(r"\.r?comp_[kv]\.", name):
         return "compression ResBlock"

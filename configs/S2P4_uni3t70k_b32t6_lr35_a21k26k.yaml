@@ -7,7 +7,7 @@ model:
   class_name: model_s2.stage2_wrapper.Stage2LagerNVS
   stage2:
     enabled: true
-    stage1_ckpt: /mnt/data-alpha-sg-01/team-camera/home/z50057756/moe_experiments/checkpoints/PLN2uni3t_all287k_b32t6_fp32lr35_wsd60k_a10k/ckpt_0000000000070000.pt
+    stage1_ckpt: /projects/u6ga/zhelun/RnG_weights/stage1/moe_experiments/checkpoints/PLN2uni3t_all287k_b32t6_fp32lr35_wsd60k_a10k/ckpt_0000000000070000.pt
     stage1_step: 70000
     target_patch: 4
     scene_radius: 2
@@ -42,12 +42,12 @@ unposed: true
 training:
   amp_dtype: bf16
   use_bf16: false
-  api_key_path: /home/z50057756/code/RnG_lagernvs/configs/api_keys.yaml
+  api_key_path: /home/u6ga/zhelun.u6ga/RnG_MOE/configs/api_keys.yaml
   batch_size_per_gpu: 8
   beta1: 0.9
   beta2: 0.95
   allowed_gradnorm_factor: 5000
-  checkpoint_dir: /mnt/data-alpha-sg-01/team-camera/home/z50057756/moe_experiments/checkpoints/${exp_name}
+  checkpoint_dir: /scratch/u6ga/zhelun.u6ga/S2_experiments/checkpoints/${exp_name}
   checkpoint_every: 2000
   checkpoint_extra_steps: [21000]
   ckpt_keep_latest: 2
@@ -59,9 +59,9 @@ training:
   val_modes: [[posed, 0.0], [unposed, 1.0]]
   dataset_name: data.dataset_objaverse.ObjaverseDataset
   dataset_path: data/objaverse_all287k.txt
-  root_path: /mnt/data-alpha-sg-02/team-camera/datasets/trellis_processed/all_train_renders
+  root_path: /projects/u6ga/zhelun/RnG_all287k_tars
   use_tar: true
-  tar_root_path: /mnt/data-alpha-sg-02/team-camera/datasets/trellis_processed/all_train_renders
+  tar_root_path: /projects/u6ga/zhelun/RnG_all287k_tars
   roll_augment_max_deg: 10.0
   grad_accum_steps: 1
   grad_checkpoint_every: 1
@@ -113,9 +113,9 @@ training:
     target_encoder_hub_dir: /home/z50057756/.cache/torch/hub/facebookresearch_dinov3_94a96ac83c2446f15f9bdcfae23cad3c6a9d4988
     target_resolution: 512
   val_dataset_name: data.dataset_gso_ours.GSODataset_ours
-  validation_out_dir: /mnt/data-alpha-sg-01/team-camera/home/z50057756/moe_experiments/checkpoints/${exp_name}
+  validation_out_dir: /scratch/u6ga/zhelun.u6ga/S2_experiments/checkpoints/${exp_name}
   val_dataset_cfgs:
-    root_dir: /home/z50057756/data/gso_sim2real_25v
+    root_dir: /projects/u6ga/zhelun/RnG_samples_eval/gso_sim2real_25v
     suffix: ''
     split_file: data/gso_subset64.txt
     roll_augment_max_deg: 0.0
