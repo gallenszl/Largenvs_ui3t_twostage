@@ -1,0 +1,116 @@
+=== uni3t full GSO eval ===
+job 137631 node lrc-alpha-sg-gpu05 branch uni3t commit 67f3ab5
+ckpt   : /mnt/data-alpha-sg-01/team-camera/home/z50057756/moe_experiments/checkpoints/PLN2pose_all287k_b32t6_fp32lr35_wsd60k_a10k/ckpt_0000000000070000.pt (step 70000)
+config : configs/RnGUP_lagernvs_b32t6_fp32lr35_const_90k_all287k.yaml
+gso    : /home/z50057756/data/gso_sim2real_25v_v2 (1030 scenes)  split data/gso.txt
+modes  : posed unposed
+NVIDIA H200, 143771 MiB
+
+=== [posed] val_cam_cond_zero_p=0.0 -> /mnt/data-alpha-sg-01/team-camera/home/z50057756/moe_experiments/evaluation/dense287k_a10k_step70000_posed_novel ===
+Loading encoder weights from pretrained VGGT
+=== uni3t full GSO eval ===
+job 137631 node lrc-alpha-sg-gpu05 branch uni3t commit 67f3ab5
+ckpt   : /mnt/data-alpha-sg-01/team-camera/home/z50057756/moe_experiments/checkpoints/PLN2pose_all287k_b32t6_fp32lr35_wsd60k_a10k/ckpt_0000000000070000.pt (step 70000)
+config : configs/RnGUP_lagernvs_b32t6_fp32lr35_const_90k_all287k.yaml
+gso    : /home/z50057756/data/gso_sim2real_25v_v2 (1030 scenes)  split data/gso.txt
+modes  : posed unposed
+NVIDIA H200, 143771 MiB
+
+=== [posed] val_cam_cond_zero_p=0.0 -> /mnt/data-alpha-sg-01/team-camera/home/z50057756/moe_experiments/evaluation/dense287k_a10k_step70000_posed_novel ===
+Loading encoder weights from pretrained VGGT
+load_ckpt: /mnt/data-alpha-sg-01/team-camera/home/z50057756/moe_experiments/checkpoints/PLN2pose_all287k_b32t6_fp32lr35_wsd60k_a10k/ckpt_0000000000070000.pt | missing 0 unexpected 0
+Running inference; save results to: /mnt/data-alpha-sg-01/team-camera/home/z50057756/moe_experiments/evaluation/dense287k_a10k_step70000_posed_novel
+Setting up [LPIPS] perceptual loss: trunk [vgg], v[0.1], spatial [off]
+Loading model from: /mnt/data-alpha-sg-01/team-camera/home/z50057756/conda/envs/rng-fa3/lib/python3.10/site-packages/lpips/weights/v0.1/vgg.pth
+Summary written to 
+/mnt/data-alpha-sg-01/team-camera/home/z50057756/moe_experiments/evaluation/dens
+e287k_a10k_step70000_posed_novel/summary.csv
+Average: 
+26.6793743466868,0.08876810907160194,0.9039363517055233,22.520208305835816,0.605
+8768102832675,0.9320585965872852,0.9791706634707584,0.6475903462980269,0.2313767
+116509595
+Summary written to 
+/mnt/data-alpha-sg-01/team-camera/home/z50057756/moe_experiments/evaluation/dens
+e287k_a10k_step70000_posed_novel/summary_depth.csv
+Average: 
+12.865123262277198,0.268120395249407,0.09744382919702978,0.2105299515660526,0.07
+911003725684594,0.24908091612811217,0.5675410614178991,0.8904467975548004,0.9869
+033090041696
+Summary written to 
+/mnt/data-alpha-sg-01/team-camera/home/z50057756/moe_experiments/evaluation/dens
+e287k_a10k_step70000_posed_novel/summary_pose.csv
+Average: 106.5163391891035,90.0
+Racc_5: 0.00%
+Racc_15: 0.00%
+Racc_30: 0.00%
+Tacc_5: 0.00%
+Tacc_15: 0.00%
+Tacc_30: 0.00%
+Auc_30: 0.00%
+[fulleval] posed took 1025s
+--- posed average_metrics.txt ---
+Average: 26.6793743466868,0.08876810907160194,0.9039363517055233,22.520208305835816,0.6058768102832675,0.9320585965872852,0.9791706634707584,0.6475903462980269,0.2313767116509595
+--- posed average_metrics_depth.txt ---
+Average:
+silog,abs_rel,log10,rms,sq_rel,log_rms,d1,d2,d3
+12.865123262277198,0.268120395249407,0.09744382919702978,0.2105299515660526,0.07911003725684594,0.24908091612811217,0.5675410614178991,0.8904467975548004,0.9869033090041696
+--- posed average_metrics_pose.txt ---
+Average: 106.5163391891035,90.0
+Racc_5: 0.00000%
+Racc_15: 0.00000%
+Racc_30: 0.00000%
+Tacc_5: 0.00000%
+Tacc_15: 0.00000%
+Tacc_30: 0.00000%
+Auc_30: 0.00000%
+[fulleval] DONE posed step=70000
+
+=== [unposed] val_cam_cond_zero_p=1.0 -> /mnt/data-alpha-sg-01/team-camera/home/z50057756/moe_experiments/evaluation/dense287k_a10k_step70000_unposed_novel ===
+Loading encoder weights from pretrained VGGT
+load_ckpt: /mnt/data-alpha-sg-01/team-camera/home/z50057756/moe_experiments/checkpoints/PLN2pose_all287k_b32t6_fp32lr35_wsd60k_a10k/ckpt_0000000000070000.pt | missing 0 unexpected 0
+Running inference; save results to: /mnt/data-alpha-sg-01/team-camera/home/z50057756/moe_experiments/evaluation/dense287k_a10k_step70000_unposed_novel
+Setting up [LPIPS] perceptual loss: trunk [vgg], v[0.1], spatial [off]
+Loading model from: /mnt/data-alpha-sg-01/team-camera/home/z50057756/conda/envs/rng-fa3/lib/python3.10/site-packages/lpips/weights/v0.1/vgg.pth
+Summary written to 
+/mnt/data-alpha-sg-01/team-camera/home/z50057756/moe_experiments/evaluation/dens
+e287k_a10k_step70000_unposed_novel/summary.csv
+Average: 
+25.10131364377957,0.0976343247496966,0.8873009150178687,21.23615695718008,0.5898
+849839748341,0.9500670672935903,0.9681911790378158,0.6028674121729097,0.23137671
+16509595
+Summary written to 
+/mnt/data-alpha-sg-01/team-camera/home/z50057756/moe_experiments/evaluation/dens
+e287k_a10k_step70000_unposed_novel/summary_depth.csv
+Average: 
+12.865123262277198,0.268120395249407,0.09744382919702978,0.2105299515660526,0.07
+911003725684594,0.24908091612811217,0.5675410614178991,0.8904467975548004,0.9869
+033090041696
+Summary written to 
+/mnt/data-alpha-sg-01/team-camera/home/z50057756/moe_experiments/evaluation/dens
+e287k_a10k_step70000_unposed_novel/summary_pose.csv
+Average: 106.5163391891035,90.0
+Racc_5: 0.00%
+Racc_15: 0.00%
+Racc_30: 0.00%
+Tacc_5: 0.00%
+Tacc_15: 0.00%
+Tacc_30: 0.00%
+Auc_30: 0.00%
+[fulleval] unposed took 1006s
+--- unposed average_metrics.txt ---
+Average: 25.10131364377957,0.0976343247496966,0.8873009150178687,21.23615695718008,0.5898849839748341,0.9500670672935903,0.9681911790378158,0.6028674121729097,0.2313767116509595
+--- unposed average_metrics_depth.txt ---
+Average:
+silog,abs_rel,log10,rms,sq_rel,log_rms,d1,d2,d3
+12.865123262277198,0.268120395249407,0.09744382919702978,0.2105299515660526,0.07911003725684594,0.24908091612811217,0.5675410614178991,0.8904467975548004,0.9869033090041696
+--- unposed average_metrics_pose.txt ---
+Average: 106.5163391891035,90.0
+Racc_5: 0.00000%
+Racc_15: 0.00000%
+Racc_30: 0.00000%
+Tacc_5: 0.00000%
+Tacc_15: 0.00000%
+Tacc_30: 0.00000%
+Auc_30: 0.00000%
+[fulleval] DONE unposed step=70000
+[fulleval] ALL DONE step=70000

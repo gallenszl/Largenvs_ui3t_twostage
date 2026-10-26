@@ -27,6 +27,7 @@
 10. 已知问题与注意事项
 11. 备份状态与 checkpoints 一览
 12. 第一阶段加轨迹一致性损失(2026-09-29 起)
+13. 第一阶段 uni3t 全量评测记录(恒定臂 + 退火臂)
 
 ---
 
@@ -817,3 +818,159 @@ r_m = 0 表示没有修正,0.5 表示修正量有原 token 的一半大。自检
 **判读(事先定)。** 主判:`tools_s2/s2_candidate_probe.py` 在 subset64 上的有位姿投影误差(均值、中位)与 37 格半径 1 命中率,新臂 vs `PLN2uni3t_all287k_b32t6_fp32lr35_const` 同步数;改善要超出 const 臂自身 66k / 72k / 76k 三点的起伏(噪声带,JSON 在 `docs/probe_results/`)。辅判:subset64 LPIPS 同步数差,0.003 为信号线;abs_rel 照报。
 
 **注意。** 这套实验用的是未修半像素的加载器,与 const 臂同口径;加载器修好后基准要重跑。
+
+---
+
+## 13. 第一阶段 uni3t 全量评测记录(恒定臂 + 退火臂)
+
+> **一句话**:第一阶段最好的存档是退火臂 `PLN2uni3t_all287k_b32t6_fp32lr35_wsd60k_a10k` ckpt_70000,也就是第二阶段冻结用的那个(第 4.1 节)。它在全量评测里两种模式的全部指标都是 uni3t 各存档中最好的:有位姿 PSNR 26.22 dB、LPIPS 0.0977、AUC30 99.04%;无位姿 PSNR 25.05 dB、LPIPS 0.1044、AUC30 92.38%。恒定臂一直训到 76k,有位姿 LPIPS 也只到 0.1071,比退火 70k 差 0.0093。
+
+本节写于 2026-10-26。评测都在原机器(lrc-alpha-sg)上做,每个作业 1 张 H200,时间是 2026-09-21 至 09-25。日志、平均结果和汇总表在 `docs/stage1_fulleval/`;逐物体的数值在 HF(第 13.4 节)。
+
+### 13.1 评测了哪些存档
+
+| 实验 | 步数 | 作业号 | 评测时的代码(原仓库 `RnG_lagernvs` uni3t 分支的提交) | 存档在哪 |
+|---|---|---|---|---|
+| `PLN2uni3t_all287k_b32t6_fp32lr35_const`(恒定学习率 3.5e-5) | 10k / 16k / 26k / 36k / 46k / 56k / 60k | 135562 / 135561 / 135760 / 136137 / 136445 / 136657 / 136767 | c70197f | HF `szlgallen/RAE_backup_checkpoints` 的 `moe_experiments/checkpoints/PLN2uni3t_all287k_b32t6_fp32lr35_const/ckpt_00000000000<步数>.pt` |
+| 同上 | 66k | 136862 | a905ef5 | 同上 |
+| 同上 | 72k | 137182 | a436f77 | 同上 |
+| 同上 | 76k | 137219 | 67f3ab5 | 同上;原机器旧盘另有一份 |
+| `PLN2uni3t_all287k_b32t6_fp32lr35_wsd60k_a10k`(从恒定臂 60k 起,学习率按 1−√进度 退火 10k 步到 0) | 70k | 137630 | 67f3ab5 | HF 同仓 `moe_experiments/checkpoints/PLN2uni3t_all287k_b32t6_fp32lr35_wsd60k_a10k/ckpt_0000000000070000.pt`(第 4.1 节) |
+| 参照:`PLN2pose_all287k_b32t6_fp32lr35_const`(单任务,只做新视角合成) | 72k | 136768 | c70197f | 只在原机器 |
+| 参照:`PLN2pose_all287k_b32t6_fp32lr35_wsd60k_a10k`(单任务,同样 60k 起退火到 70k) | 70k | 137631 | 67f3ab5 | 只在原机器 |
+
+表注:
+- 恒定臂原计划训到 90k,实际停在 76k。中间每 2000 步的存档没有保留,所以全量评测只有表里这 10 个点。
+- 四个提交之间,评测用到的模型、数据和打分代码完全相同;差别只在评测作业脚本(加了输出目录参数)和训练用的一个写文件保护函数(`utils/training_utils.py`,评测不调用)。
+- 两条单任务臂和 uni3t 用同样的数据、batch、学习率和日程,只是不做位姿和点图。拿它们比,能看出"同时做三个任务"对新视角合成的影响。
+
+### 13.2 怎么评测
+
+**一句话**:每个存档在 GSO 全部 1030 个物体上跑两遍,一遍给输入图的相机,一遍不给。每个物体用 4 张输入图渲染 10 张新视角,和真图比画质;同时比 10 张目标图的深度和 4 张输入图的位姿。
+
+**数据和视角**
+- 数据:GSO `gso_sim2real_25v_v2`(EVv2 渲染,每个物体 25 个视角,256 × 256),分割文件 `data/gso.txt`,共 1030 个物体。数据位置见第 4.3 节。
+- 每个物体从 25 个视角里抽 14 个:前 4 个当输入,后 10 个当目标。抽法在 `data/dataset_gso_ours.py`:固定随机种子 0,按分割文件里的顺序逐个物体抽。所以用同一个分割文件,每次抽到的视角都一样;只评一部分物体时不要另做分割文件,否则视角会变。
+- 不做平面内旋转(`training.roll_augment_max_deg=0`)。训练时是随机 ±10°。
+- 目标视角不和输入视角重复(`target_has_input=false`)。
+
+**两种模式**
+- 有位姿:把 4 张输入图的相机作为条件给模型(`training.val_cam_cond_zero_p=0.0`)。
+- 无位姿:相机条件全部置零(`training.val_cam_cond_zero_p=1.0`),和训练时 40% 不给位姿的样本是同一种情况。
+- 有位姿时,给定的相机会先进入 VGGT(`camera_mlp`),位姿头读的正是 VGGT 最后一层相机位置的 token,所以有位姿时位姿指标接近满分。看位姿能力以无位姿那一列为准。
+
+**命令**(当时实际用的是原仓库的 `scripts/uni3t_fulleval_gso.sbatch`):
+```bash
+sbatch scripts/uni3t_fulleval_gso.sbatch <ckpt 文件> <标签> "posed unposed" <配置> <输出根目录>
+```
+脚本对每个模式各执行一次(1 张 GPU):
+```bash
+python -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node=1 inference.py \
+  --config <配置> \
+  training.checkpoint_dir=<ckpt 文件> \
+  inference_out_dir=<输出根目录>/<标签>_<posed 或 unposed>_novel \
+  training.val_cam_cond_zero_p=<0.0 或 1.0> \
+  training.val_dataset_cfgs.root_dir=<gso_sim2real_25v_v2 目录> \
+  training.val_dataset_cfgs.split_file=data/gso.txt \
+  training.target_has_input=false \
+  training.val_dataset_cfgs.training.target_has_input=false \
+  training.val_dataset_cfgs.training.num_views=14 \
+  training.val_dataset_cfgs.training.num_input_views=4 \
+  training.val_dataset_cfgs.training.num_target_views=10 \
+  training.roll_augment_max_deg=0 \
+  inference.generate_website=false
+```
+- 配置:两条 uni3t 臂都用 `configs/RnGUP_lagernvs_uni3t_b32t6_fp32lr35_const_90k_all287k.yaml`,两条单任务臂都用 `configs/RnGUP_lagernvs_b32t6_fp32lr35_const_90k_all287k.yaml`。退火臂和恒定臂的模型结构相同,评测只用到结构和验证集设置,日程设置不起作用。
+- 在本仓库复现:用 `scripts_s2/uni3t_fulleval_gso.sbatch`。协议和全部覆盖参数相同,只是进入本仓库目录、日志写在本仓库。本仓库的 `inference.py`、`utils/metric_utils.py` 与当时逐字相同;`data/dataset_gso_ours.py`、`model/lagernvs_wrapper.py` 只多了缺省关闭的开关(验证集单独设旋转、轨迹一致性损失),评测时行为不变。
+- 耗时:每个模式 1 张 H200 约 17–28 分钟(日志里 `[fulleval] <模式> took` 那一行,1035–1671 秒)。
+
+**指标怎么算**(代码都在 `utils/metric_utils.py`)
+- 画质类指标每张目标图单独算,再对 1030 × 10 张图取平均。
+- PSNR:像素值 0–1,先算整张图(含白背景)的平均平方误差 e,再取 PSNR = −10 × log10(e)。越高越好。
+- LPIPS:`lpips` 包的 VGG 版本(`LPIPS(net="vgg")`)。越低越好。
+- SSIM:`skimage` 的 `structural_similarity`,窗口 11、高斯加权、像素范围 1。越高越好。
+- 前景 PSNR / 前景 SSIM:只在物体内部算。物体内部 = 真值透明度 > 0.5 的区域再向内收 1 个像素,去掉轮廓那一圈。
+- 深度 abs_rel / d1:把模型预测的点图变换到目标相机坐标系,取 z 当深度;只在真值深度 > 0 的像素上算。abs_rel = |预测 − 真值| ÷ 真值 的平均,越低越好;d1 = 预测与真值之比(大的除以小的)小于 1.25 的像素比例,越高越好。
+- 位姿:4 张输入图两两配成 6 对,每对算相对旋转误差和平移方向误差,单位是度。先在每个物体内部对 6 对取平均,得到这个物体的旋转误差和平移误差;再取两者中较大的那个,在 1030 个物体上算 0–30° 的 AUC(百分数)。表里的"旋转误差""平移误差"是 1030 个物体的平均。
+- **AUC30 口径提醒**:VGGT 论文是逐对算 AUC,不先在物体内部平均,所以这里的 AUC30 不能和论文的数直接比。这个算法保持不改(2026-09-29 定),以便和本项目以前的所有实验一致。
+
+### 13.3 结果
+
+**有位姿**
+
+| 实验 | 步数 | PSNR | LPIPS | SSIM | 前景 PSNR | 前景 SSIM | 深度 abs_rel | 深度 d1 | 旋转误差(°) | 平移误差(°) | AUC30(%) |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 恒定 `PLN2uni3t_all287k_b32t6_fp32lr35_const` | 10k | 21.10 | 0.2049 | 0.8338 | 16.35 | 0.4522 | 0.0296 | 0.9884 | 2.79 | 2.68 | 90.48 |
+| 恒定 `PLN2uni3t_all287k_b32t6_fp32lr35_const` | 16k | 21.92 | 0.1872 | 0.8454 | 17.74 | 0.4879 | 0.0271 | 0.9891 | 2.57 | 2.38 | 91.52 |
+| 恒定 `PLN2uni3t_all287k_b32t6_fp32lr35_const` | 26k | 22.85 | 0.1568 | 0.8559 | 18.55 | 0.5080 | 0.0229 | 0.9911 | 1.75 | 1.82 | 94.22 |
+| 恒定 `PLN2uni3t_all287k_b32t6_fp32lr35_const` | 36k | 23.18 | 0.1368 | 0.8628 | 18.64 | 0.5230 | 0.0198 | 0.9928 | 1.56 | 1.59 | 95.19 |
+| 恒定 `PLN2uni3t_all287k_b32t6_fp32lr35_const` | 46k | 23.85 | 0.1243 | 0.8692 | 19.97 | 0.5483 | 0.0186 | 0.9935 | 1.32 | 1.32 | 96.27 |
+| 恒定 `PLN2uni3t_all287k_b32t6_fp32lr35_const` | 56k | 24.00 | 0.1173 | 0.8708 | 19.84 | 0.5531 | 0.0181 | 0.9939 | 1.18 | 1.28 | 96.63 |
+| 恒定 `PLN2uni3t_all287k_b32t6_fp32lr35_const` | 60k | 23.77 | 0.1166 | 0.8689 | 20.08 | 0.5535 | 0.0182 | 0.9933 | 1.17 | 1.21 | 96.73 |
+| 恒定 `PLN2uni3t_all287k_b32t6_fp32lr35_const` | 66k | 23.91 | 0.1135 | 0.8706 | 20.05 | 0.5545 | 0.0180 | 0.9935 | 1.12 | 1.29 | 96.71 |
+| 恒定 `PLN2uni3t_all287k_b32t6_fp32lr35_const` | 72k | 24.50 | 0.1083 | 0.8777 | 20.68 | 0.5745 | 0.0162 | 0.9939 | 1.07 | 1.08 | 97.41 |
+| 恒定 `PLN2uni3t_all287k_b32t6_fp32lr35_const` | 76k | 24.48 | 0.1071 | 0.8782 | 20.38 | 0.5745 | 0.0165 | 0.9938 | 1.12 | 1.21 | 96.91 |
+| **退火 `PLN2uni3t_all287k_b32t6_fp32lr35_wsd60k_a10k`** | **70k** | **26.22** | **0.0977** | **0.8969** | **21.99** | **0.6208** | **0.0121** | **0.9958** | **0.70** | **0.64** | **99.04** |
+| 参照:单任务恒定 `PLN2pose_all287k_b32t6_fp32lr35_const` | 72k | 24.35 | 0.1021 | 0.8779 | 20.36 | 0.5751 | — | — | — | — | — |
+| 参照:单任务退火 `PLN2pose_all287k_b32t6_fp32lr35_wsd60k_a10k` | 70k | 26.68 | 0.0888 | 0.9039 | 22.52 | 0.6476 | — | — | — | — | — |
+
+**无位姿**
+
+| 实验 | 步数 | PSNR | LPIPS | SSIM | 前景 PSNR | 前景 SSIM | 深度 abs_rel | 深度 d1 | 旋转误差(°) | 平移误差(°) | AUC30(%) |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 恒定 `PLN2uni3t_all287k_b32t6_fp32lr35_const` | 10k | 20.90 | 0.2074 | 0.8315 | 16.26 | 0.4505 | 0.0313 | 0.9864 | 11.29 | 6.72 | 78.33 |
+| 恒定 `PLN2uni3t_all287k_b32t6_fp32lr35_const` | 16k | 21.62 | 0.1900 | 0.8426 | 17.43 | 0.4826 | 0.0291 | 0.9875 | 12.48 | 7.59 | 74.74 |
+| 恒定 `PLN2uni3t_all287k_b32t6_fp32lr35_const` | 26k | 22.40 | 0.1615 | 0.8513 | 18.18 | 0.4997 | 0.0252 | 0.9894 | 9.51 | 5.90 | 80.47 |
+| 恒定 `PLN2uni3t_all287k_b32t6_fp32lr35_const` | 36k | 22.76 | 0.1416 | 0.8577 | 18.30 | 0.5137 | 0.0226 | 0.9905 | 9.00 | 5.49 | 81.34 |
+| 恒定 `PLN2uni3t_all287k_b32t6_fp32lr35_const` | 46k | 23.18 | 0.1305 | 0.8615 | 19.47 | 0.5337 | 0.0211 | 0.9916 | 7.82 | 4.78 | 84.24 |
+| 恒定 `PLN2uni3t_all287k_b32t6_fp32lr35_const` | 56k | 23.29 | 0.1244 | 0.8631 | 19.02 | 0.5339 | 0.0215 | 0.9912 | 7.16 | 4.64 | 84.77 |
+| 恒定 `PLN2uni3t_all287k_b32t6_fp32lr35_const` | 60k | 23.18 | 0.1234 | 0.8619 | 19.60 | 0.5385 | 0.0207 | 0.9917 | 7.26 | 4.53 | 85.05 |
+| 恒定 `PLN2uni3t_all287k_b32t6_fp32lr35_const` | 66k | 23.47 | 0.1192 | 0.8659 | 19.39 | 0.5418 | 0.0203 | 0.9918 | 7.54 | 4.73 | 84.49 |
+| 恒定 `PLN2uni3t_all287k_b32t6_fp32lr35_const` | 72k | 23.67 | 0.1158 | 0.8684 | 19.96 | 0.5530 | 0.0190 | 0.9920 | 7.21 | 4.11 | 85.69 |
+| 恒定 `PLN2uni3t_all287k_b32t6_fp32lr35_const` | 76k | 23.75 | 0.1145 | 0.8696 | 19.69 | 0.5523 | 0.0194 | 0.9919 | 7.25 | 4.63 | 84.37 |
+| **退火 `PLN2uni3t_all287k_b32t6_fp32lr35_wsd60k_a10k`** | **70k** | **25.05** | **0.1044** | **0.8845** | **21.07** | **0.5895** | **0.0151** | **0.9943** | **3.44** | **2.42** | **92.38** |
+| 参照:单任务恒定 `PLN2pose_all287k_b32t6_fp32lr35_const` | 72k | 23.55 | 0.1108 | 0.8691 | 19.52 | 0.5526 | — | — | — | — | — |
+| 参照:单任务退火 `PLN2pose_all287k_b32t6_fp32lr35_wsd60k_a10k` | 70k | 25.10 | 0.0976 | 0.8873 | 21.24 | 0.6029 | — | — | — | — | — |
+
+表注:
+- 加粗的是退火 70k:两种模式下,表里十列指标在 uni3t 的 11 个存档里都是最好的。
+- 本项目判读以 LPIPS 为主,两个存档 LPIPS 差超过 0.003 才当作有差别;PSNR 要差 0.6 dB、前景 PSNR 要差 0.5 dB 以上。
+- 单任务臂没有深度头和位姿头。评测程序照样写了深度、位姿文件,里面是固定的占位数(abs_rel 0.2681、AUC30 0%),表里不填。
+- 全部数字在 `docs/stage1_fulleval/summary.csv`,每一行对应 `docs/stage1_fulleval/averages/` 下评测程序写出的平均结果原件。
+
+**读法**
+1. **退火 10k 步的效果远大于继续恒定训练**。退火 70k 比恒定臂最后的 76k:有位姿 LPIPS 低 0.0093、PSNR 高 1.74 dB、前景 PSNR 高 1.61 dB;无位姿 LPIPS 低 0.0101、AUC30 高 8.01 个百分点。
+2. **和退火起点比**(恒定 60k 就是退火的起点):有位姿 LPIPS 从 0.1166 降到 0.0977,PSNR 高 2.45 dB;无位姿 AUC30 从 85.05% 升到 92.38%。
+3. **恒定臂的 LPIPS 一路在降**:有位姿从 10k 的 0.2049 降到 76k 的 0.1071。PSNR 在相邻存档之间并不总是上升,降得最多的是 56k → 60k(有位姿 24.00 → 23.77 dB),这是恒定学习率下存档之间的正常起伏。
+4. **同时做三个任务对新视角合成的代价**(uni3t 减单任务,LPIPS 越大越差):退火 70k 有位姿 +0.0090、无位姿 +0.0068;恒定 72k 有位姿 +0.0062、无位姿 +0.0050。退火之后代价反而更大一些。
+
+### 13.4 日志与原始结果在哪
+
+| 内容 | 位置 |
+|---|---|
+| 汇总表(26 行 = 13 个存档 × 2 种模式) | `docs/stage1_fulleval/summary.csv` |
+| 评测程序写出的平均结果原件 | `docs/stage1_fulleval/averages/<实验名>_step<步数>_<posed 或 unposed>/average_metrics{,_depth,_pose}.txt` |
+| 13 个作业的完整日志 | `docs/stage1_fulleval/logs/uni3t-fulleval-<作业号>.{out,err}` |
+| 逐物体、逐视角的数值(不含图片) | HF `szlgallen/RAE_backup_checkpoints` 的 `moe_experiments/evaluation/uni3t_stage1_fulleval/<实验名>_step<步数>_<posed 或 unposed>_per_object_metrics.tar.gz`,共 26 个包、111 MB;sha256 在 `docs/stage1_fulleval/per_object_SHA256SUMS.txt`(HF 同目录也有一份 `SHA256SUMS.txt`) |
+| 含渲染对比图的完整输出(20.4 GB) | 只在原机器,路径见 `summary.csv` 的 `source_dir` 列 |
+
+每个 HF 包解开后是一个以 `<实验名>_step<步数>_<模式>` 命名的目录,里面有:
+- `summary.csv` / `summary_depth.csv` / `summary_pose.csv`:每个物体一行(1030 行)的画质、深度、位姿结果;
+- 三个 `average_metrics*.txt`:和 `docs/stage1_fulleval/averages/` 里的相同;
+- 每个物体一个子目录,内含 `metrics.json`(10 张目标图逐张的画质)、`metrics_depth.json`(逐张的深度)、`metrics_pose.json`(预测和真值位姿、6 对的误差)。
+
+下载和核对:
+```bash
+hf download szlgallen/RAE_backup_checkpoints \
+  moe_experiments/evaluation/uni3t_stage1_fulleval/PLN2uni3t_all287k_b32t6_fp32lr35_wsd60k_a10k_step70000_posed_per_object_metrics.tar.gz \
+  --local-dir /path/to/dir
+cd /path/to/dir/moe_experiments/evaluation/uni3t_stage1_fulleval
+grep "PLN2uni3t_all287k_b32t6_fp32lr35_wsd60k_a10k_step70000_posed_" <本仓库>/docs/stage1_fulleval/per_object_SHA256SUMS.txt | sha256sum -c
+tar -xzf PLN2uni3t_all287k_b32t6_fp32lr35_wsd60k_a10k_step70000_posed_per_object_metrics.tar.gz
+```
+
+### 13.5 注意事项
+- **日志里有重复的段落**。36k、46k、56k 三个作业排在可被抢占的队列上,被抢占后自动重排,日志是追加写的,所以里面有多次开头(36k 共启动 10 次)。每次重跑都从第一个物体重新评、覆盖之前的结果;三份日志的最后一次运行都是两个模式完整跑完(结尾有 `ALL DONE`),表里的数就来自这一次。
+- **同一个存档评两次,结果几乎一样**。恒定 66k/72k/76k 在 09-30 由另一个会话又评过一次(原机器 `moe_experiments/evaluation/cons/`),恒定 26k/36k 在 10-03/10-05 又评过一次。和表里的数比,最大差别是 PSNR 0.0005 dB、LPIPS 0.00001、前景 PSNR 0.0005 dB,AUC30 完全相同。这是 GPU 计算顺序带来的微小差别;表里用的是本节日志对应的那一次。
+- **退火臂评测用的是恒定臂的配置**:两者模型结构一样,评测只用到结构和验证集设置。
+- **和训练中的评测不能直接比**:训练中每 2000 步评一次,用的是 v1 渲染的 64 个物体(`data/gso_subset64.txt`),而且每次随机转 ±10°;全量评测用 v2 渲染的 1030 个物体、不旋转。

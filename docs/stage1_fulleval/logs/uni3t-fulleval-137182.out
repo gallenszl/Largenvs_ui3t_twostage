@@ -1,0 +1,134 @@
+=== uni3t full GSO eval ===
+job 137182 node lrc-alpha-sg-gpu12 branch uni3t commit a436f77
+ckpt   : /mnt/data-alpha-sg-01/team-camera/home/z50057756/moe_experiments/checkpoints/PLN2uni3t_all287k_b32t6_fp32lr35_const/ckpt_0000000000072000.pt (step 72000)
+config : configs/RnGUP_lagernvs_uni3t_b32t6_fp32lr35_const_90k_all287k.yaml
+gso    : /home/z50057756/data/gso_sim2real_25v_v2 (1030 scenes)  split data/gso.txt
+modes  : posed unposed
+NVIDIA H200, 143771 MiB
+
+=== [posed] val_cam_cond_zero_p=0.0 -> /home/z50057756/code/RnG_lagernvs/experiments/evaluation/uni3t_step72000_posed_novel ===
+Loading encoder weights from pretrained VGGT
+UNI3T: loaded 69 pretrained camera_head tensors from VGGT-1B
+load_ckpt: /mnt/data-alpha-sg-01/team-camera/home/z50057756/moe_experiments/checkpoints/PLN2uni3t_all287k_b32t6_fp32lr35_const/ckpt_0000000000072000.pt | missing 0 unexpected 0
+Running inference; save results to: /home/z50057756/code/RnG_lagernvs/experiments/evaluation/uni3t_step72000_posed_novel
+Setting up [LPIPS] perceptual loss: trunk [vgg], v[0.1], spatial [off]
+Loading model from: /mnt/data-alpha-sg-01/team-camera/home/z50057756/conda/envs/rng-fa3/lib/python3.10/site-packages/lpips/weights/v0.1/vgg.pth
+=== uni3t full GSO eval ===
+job 137182 node lrc-alpha-sg-gpu02 branch uni3t commit 67f3ab5
+ckpt   : /mnt/data-alpha-sg-01/team-camera/home/z50057756/moe_experiments/checkpoints/PLN2uni3t_all287k_b32t6_fp32lr35_const/ckpt_0000000000072000.pt (step 72000)
+config : configs/RnGUP_lagernvs_uni3t_b32t6_fp32lr35_const_90k_all287k.yaml
+gso    : /home/z50057756/data/gso_sim2real_25v_v2 (1030 scenes)  split data/gso.txt
+modes  : posed unposed
+NVIDIA H200, 143771 MiB
+
+=== [posed] val_cam_cond_zero_p=0.0 -> /home/z50057756/code/RnG_lagernvs/experiments/evaluation/uni3t_step72000_posed_novel ===
+Loading encoder weights from pretrained VGGT
+=== uni3t full GSO eval ===
+job 137182 node lrc-alpha-sg-gpu02 branch uni3t commit 67f3ab5
+ckpt   : /mnt/data-alpha-sg-01/team-camera/home/z50057756/moe_experiments/checkpoints/PLN2uni3t_all287k_b32t6_fp32lr35_const/ckpt_0000000000072000.pt (step 72000)
+config : configs/RnGUP_lagernvs_uni3t_b32t6_fp32lr35_const_90k_all287k.yaml
+gso    : /home/z50057756/data/gso_sim2real_25v_v2 (1030 scenes)  split data/gso.txt
+modes  : posed unposed
+NVIDIA H200, 143771 MiB
+
+=== [posed] val_cam_cond_zero_p=0.0 -> /home/z50057756/code/RnG_lagernvs/experiments/evaluation/uni3t_step72000_posed_novel ===
+Loading encoder weights from pretrained VGGT
+UNI3T: loaded 69 pretrained camera_head tensors from VGGT-1B
+load_ckpt: /mnt/data-alpha-sg-01/team-camera/home/z50057756/moe_experiments/checkpoints/PLN2uni3t_all287k_b32t6_fp32lr35_const/ckpt_0000000000072000.pt | missing 0 unexpected 0
+Running inference; save results to: /home/z50057756/code/RnG_lagernvs/experiments/evaluation/uni3t_step72000_posed_novel
+Setting up [LPIPS] perceptual loss: trunk [vgg], v[0.1], spatial [off]
+Loading model from: /mnt/data-alpha-sg-01/team-camera/home/z50057756/conda/envs/rng-fa3/lib/python3.10/site-packages/lpips/weights/v0.1/vgg.pth
+Summary written to 
+/home/z50057756/code/RnG_lagernvs/experiments/evaluation/uni3t_step72000_posed_n
+ovel/summary.csv
+Average: 
+24.503331416787454,0.10833586165048543,0.8776690800502462,20.68171809588148,0.55
+27898802842927,0.9177802204377613,0.9555416348496671,0.5744997280771003,0.231376
+7116509595
+Summary written to 
+/home/z50057756/code/RnG_lagernvs/experiments/evaluation/uni3t_step72000_posed_n
+ovel/summary_depth.csv
+Average: 
+2.6314789079666956,0.016182422148893375,0.007149942027138164,0.02453341145714909
+8,0.00138825098649925,0.028585833978084212,0.9939283246644864,0.9984384993118923
+,0.999445332597304
+Summary written to 
+/home/z50057756/code/RnG_lagernvs/experiments/evaluation/uni3t_step72000_posed_n
+ovel/summary_pose.csv
+Average: 1.0714884817889594,1.0818324602634004
+Racc_5: 100.00%
+Racc_15: 100.00%
+Racc_30: 100.00%
+Tacc_5: 98.54%
+Tacc_15: 100.00%
+Tacc_30: 100.00%
+Auc_30: 97.41%
+[fulleval] posed took 1575s
+--- posed average_metrics.txt ---
+Average: 24.503331416787454,0.10833586165048543,0.8776690800502462,20.68171809588148,0.5527898802842927,0.9177802204377613,0.9555416348496671,0.5744997280771003,0.2313767116509595
+--- posed average_metrics_depth.txt ---
+Average:
+silog,abs_rel,log10,rms,sq_rel,log_rms,d1,d2,d3
+2.6314789079666956,0.016182422148893375,0.007149942027138164,0.024533411457149098,0.00138825098649925,0.028585833978084212,0.9939283246644864,0.9984384993118923,0.999445332597304
+--- posed average_metrics_pose.txt ---
+Average: 1.0714884817889594,1.0818324602634004
+Racc_5: 100.00000%
+Racc_15: 100.00000%
+Racc_30: 100.00000%
+Tacc_5: 98.54369%
+Tacc_15: 100.00000%
+Tacc_30: 100.00000%
+Auc_30: 97.41100%
+[fulleval] DONE posed step=72000
+
+=== [unposed] val_cam_cond_zero_p=1.0 -> /home/z50057756/code/RnG_lagernvs/experiments/evaluation/uni3t_step72000_unposed_novel ===
+Loading encoder weights from pretrained VGGT
+UNI3T: loaded 69 pretrained camera_head tensors from VGGT-1B
+load_ckpt: /mnt/data-alpha-sg-01/team-camera/home/z50057756/moe_experiments/checkpoints/PLN2uni3t_all287k_b32t6_fp32lr35_const/ckpt_0000000000072000.pt | missing 0 unexpected 0
+Running inference; save results to: /home/z50057756/code/RnG_lagernvs/experiments/evaluation/uni3t_step72000_unposed_novel
+Setting up [LPIPS] perceptual loss: trunk [vgg], v[0.1], spatial [off]
+Loading model from: /mnt/data-alpha-sg-01/team-camera/home/z50057756/conda/envs/rng-fa3/lib/python3.10/site-packages/lpips/weights/v0.1/vgg.pth
+Summary written to 
+/home/z50057756/code/RnG_lagernvs/experiments/evaluation/uni3t_step72000_unposed
+_novel/summary.csv
+Average: 
+23.669225706637484,0.11582446052032767,0.8683749614120687,19.960168397836746,0.5
+392643240125131,0.9304420922048201,0.9523363270467662,0.5530035452125138,0.23137
+67116509595
+Summary written to 
+/home/z50057756/code/RnG_lagernvs/experiments/evaluation/uni3t_step72000_unposed
+_novel/summary_depth.csv
+Average: 
+2.9255394593707065,0.0190452991942174,0.008394893893002268,0.02747723038319626,0
+.001775611234784749,0.03222306385109637,0.9919852393427985,0.9979498004113995,0.
+9993469908021433
+Summary written to 
+/home/z50057756/code/RnG_lagernvs/experiments/evaluation/uni3t_step72000_unposed
+_novel/summary_pose.csv
+Average: 7.207019295188987,4.112461095845815
+Racc_5: 85.53%
+Racc_15: 93.40%
+Racc_30: 94.08%
+Tacc_5: 85.15%
+Tacc_15: 93.98%
+Tacc_30: 97.38%
+Auc_30: 85.69%
+[fulleval] unposed took 1499s
+--- unposed average_metrics.txt ---
+Average: 23.669225706637484,0.11582446052032767,0.8683749614120687,19.960168397836746,0.5392643240125131,0.9304420922048201,0.9523363270467662,0.5530035452125138,0.2313767116509595
+--- unposed average_metrics_depth.txt ---
+Average:
+silog,abs_rel,log10,rms,sq_rel,log_rms,d1,d2,d3
+2.9255394593707065,0.0190452991942174,0.008394893893002268,0.02747723038319626,0.001775611234784749,0.03222306385109637,0.9919852393427985,0.9979498004113995,0.9993469908021433
+--- unposed average_metrics_pose.txt ---
+Average: 7.207019295188987,4.112461095845815
+Racc_5: 85.53398%
+Racc_15: 93.39806%
+Racc_30: 94.07767%
+Tacc_5: 85.14563%
+Tacc_15: 93.98058%
+Tacc_30: 97.37864%
+Auc_30: 85.69256%
+[fulleval] DONE unposed step=72000
+[fulleval] ALL DONE step=72000
+[fulleval] wrote done-marker fulleval_72000.done
