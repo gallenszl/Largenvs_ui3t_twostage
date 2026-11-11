@@ -28,6 +28,7 @@
 11. 备份状态与 checkpoints 一览
 12. 第一阶段加轨迹一致性损失(2026-09-29 起)
 13. 第一阶段 uni3t 全量评测记录(恒定臂 + 退火臂)
+14. 第一阶段怎么训(uni3t 恒定臂 → 退火臂)
 
 ---
 
@@ -160,6 +161,8 @@ sha256sum /path/to/ckpts/moe_experiments/checkpoints/PLN2uni3t_all287k_b32t6_fp3
 
 **怎么用**:第二阶段配置里的 `model.stage2.stage1_ckpt` 指向它,`stage1_step: 70000` 不动(载入时与 ckpt 里的步数比对)。单独跑第一阶段用 `configs/RnGUP_lagernvs_uni3t_b32t6_fp32lr35_wsd60k_a10k_all287k.yaml`,命令见 `scripts_s2/s2_s1ref_subset64.sbatch`。
 
+**从零训练**:第一阶段分两步训出来(恒定学习率训到 60k 步,再退火 10k 步),步骤、参数和换机器要改的路径见第 14 节。
+
 **本机复现**:Isambard 上用原 `inference.py` 评测 GSO v1 subset64(作业 6906869),与原机器存档(作业 137862)相比,有位姿 PSNR 差 +0.0012 dB、LPIPS 差 −0.00003,复现成立(第 7.1 节)。
 
 ### 4.2 其余权重
@@ -200,6 +203,7 @@ grep -rn "/projects/u6ga\|/scratch/u6ga\|/home/u6ga" configs/S2P* scripts_s2 too
 | `scripts_s2/s2_train.sbatch` | 接力时提交自己用的绝对路径;磁盘预检(`$S2_ROOT` 剩余 ≥ 40 GB) |
 | `scripts_s2/s2_fulleval.sbatch` | `GSO_ROOT` |
 | `tools_s2/s2_gt_edge_stats.py` | 几个数据集的根目录 |
+| `configs/RnGUP_lagernvs_uni3t_b32t6_fp32lr35_const_90k_all287k.yaml`、`configs/RnGUP_lagernvs_uni3t_b32t6_fp32lr35_wsd60k_a10k_all287k.yaml`(第一阶段,第 14 节) | 写的是**原机器**路径,上面的 grep 查不到:`training.root_path` 与 `tar_root_path`(sg-02 上的 287k 渲染);`training.checkpoint_dir` 与 `validation_out_dir`(sg-01 旧盘);`training.val_dataset_cfgs.root_dir`;退火配置另有 `training.resume_ckpt`。查法:`grep -n "/mnt/data-alpha\|/home/z50057756" configs/RnGUP_lagernvs_uni3t_b32t6_fp32lr35_*_all287k.yaml`(其中模型权重那几行代码不读,见第 4.2 节) |
 
 第 12 节的 `scripts_s2/uni3t_*.sbatch`、`scripts_s2/track_probe_cpu.sbatch` 是按原机器集群写的(分区 `gpu` / `cpu`、`--gres=gpu:h200:N`、`/home/z50057756/…`),换集群时要同样改。
 
@@ -974,3 +978,150 @@ tar -xzf PLN2uni3t_all287k_b32t6_fp32lr35_wsd60k_a10k_step70000_posed_per_object
 - **同一个存档评两次,结果几乎一样**。恒定 66k/72k/76k 在 09-30 由另一个会话又评过一次(原机器 `moe_experiments/evaluation/cons/`),恒定 26k/36k 在 10-03/10-05 又评过一次。和表里的数比,最大差别是 PSNR 0.0005 dB、LPIPS 0.00001、前景 PSNR 0.0005 dB,AUC30 完全相同。这是 GPU 计算顺序带来的微小差别;表里用的是本节日志对应的那一次。
 - **退火臂评测用的是恒定臂的配置**:两者模型结构一样,评测只用到结构和验证集设置。
 - **和训练中的评测不能直接比**:训练中每 2000 步评一次,用的是 v1 渲染的 64 个物体(`data/gso_subset64.txt`),而且每次随机转 ±10°;全量评测用 v2 渲染的 1030 个物体、不旋转。
+
+---
+
+## 14. 第一阶段怎么训(uni3t 恒定臂 → 退火臂)
+
+第一阶段权重(第 4.1 节)分两步训出来:先用恒定学习率从零训到 60k 步,再从第 60k 步的存档接着训 10k 步,学习率在这 10k 步里降到 0。两步各用一个配置,配置、代码和启动脚本都在本仓库。第一阶段只在原机器上训过;下面 Isambard 的做法没有实际跑过。
+
+### 14.1 两步一览
+
+| 步 | 实验名 | 配置 | 起点 | 训到 | 原机器的作业与速度 |
+|---|---|---|---|---|---|
+| 1 恒定 | `PLN2uni3t_all287k_b32t6_fp32lr35_const` | `configs/RnGUP_lagernvs_uni3t_b32t6_fp32lr35_const_90k_all287k.yaml` | 从零 | 配置写 90,000 步;原机器训到 76,000 步停,第 2 步只用 ckpt_60000 | 133350 → 133351 → 136283,4 × H200,约 4.1–4.2 秒/步 |
+| 2 退火 | `PLN2uni3t_all287k_b32t6_fp32lr35_wsd60k_a10k` | `configs/RnGUP_lagernvs_uni3t_b32t6_fp32lr35_wsd60k_a10k_all287k.yaml` | 第 1 步的 ckpt_60000,含优化器和学习率日程的状态 | 70,000 步 | 137247,4 × H200,约 4.0 秒/步,共 11 小时 20 分 |
+
+表注:
+- 按原机器的速度,第 1 步从零到 60k 约 69 小时(60,000 步 × 4.15 秒),要分几个作业接力;第 2 步一个作业就够。
+- 训练曲线在 W&B 项目 `szlgallen-peking-university/PLN2_lagernvs`:第 1 步是运行 `7f6f1p9o`,第 2 步是运行 `h5bcv3c3`。第 1 步的曲线在 16k–41k 有两段:作业 133350 从 18k 起存盘一直失败(当时磁盘配额满了),133351 从 16k 的存档重跑了这一段,最终模型来自重跑的那段。
+- 两个关键存档都在 HF `szlgallen/RAE_backup_checkpoints`:起点 `moe_experiments/checkpoints/PLN2uni3t_all287k_b32t6_fp32lr35_const/ckpt_0000000000060000.pt`(16,755,969,541 字节,sha256 `d8a8a45d4998c6e05b4e769ad19d89eeeb8da267594e9cba0fe2638e30ad101b`);终点 ckpt_70000 见第 4.1 节。两个实验目录里也有训练时的 `config.yaml`。
+
+### 14.2 训练参数
+
+两步的参数完全相同,只有学习率日程不同(第 14.3 节)。
+
+| 项 | 值 | 配置键 |
+|---|---|---|
+| 训练数据 | all287k,287,562 个物体(第 14.4 节) | `training.dataset_path`、`root_path`、`tar_root_path` |
+| 卡数 × 每卡样本 = 总 batch | 4 × 8 = 32 | 4 卡由启动脚本决定;`training.batch_size_per_gpu: 8` |
+| 每个样本的视角 | 4 张输入 + 6 张目标 | `num_input_views: 4`、`num_target_views: 6` |
+| 学习率 | 3.5e-5,热身 3,000 步后保持不变 | `lr`、`warmup`、`scheduler_type: constant` |
+| 优化器 | AdamW,β = (0.9, 0.95),权重衰减 0.05,梯度裁剪 1.0 | `beta1`、`beta2`、`weight_decay`、`grad_clip_norm` |
+| 精度 | fp32 参数,计算用 bf16 自动混合精度 | `use_bf16: false`、`use_amp: true`、`amp_dtype: bf16` |
+| 前景窗口 | 前 10,000 步 L2 只算物体像素 | `exclude_bg_frac: 0.111111`(× 90,000 步 = 10,000 步) |
+| 目标里混入输入视角的概率 | 0.1 | `target_has_input_prob` |
+| 位姿输入 | 训练时每个样本有 40% 概率把输入位姿置零 | `cam_cond_zero_p: 0.4` |
+| 损失 | L2 × 1.0 + 感知 × 0.5 + 位姿 × 1.0 + 点图 × 0.2 | `l2_loss_weight`、`perceptual_loss_weight`、`weight_camera`、`weight_point` |
+| 数据增强 | 随机平面内旋转 ±10° | `roll_augment_max_deg: 10.0` |
+| 存档 | 每 2,000 步一个完整状态(模型 + 优化器 + 学习率日程),每个 16.8 GB | `checkpoint_every: 2000` |
+| 训练中评测 | 每 2,000 步一次,GSO v1 的 64 个物体,每次随机转 ±10° | `val_dataset_cfgs`(`split_file: data/gso_subset64.txt`) |
+
+表注:
+- **前景窗口**:训练开头的这些步里,L2 损失只算物体所在的像素,不算背景;这样模型不会一开始就把整张图都输出成白色背景。窗口长度 = `exclude_bg_frac` × `train_steps`。**不要为了在 60k 停下而把 `train_steps` 改成 60000**,那会把窗口缩成 6,667 步;保持配置不变,存下 ckpt_60000 后停掉即可。
+- **混入概率**:每个样本的目标视角里,混进一张输入视角的概率。
+- **位姿置零**:训练时随机把输入位姿置零,所以给不给位姿模型都能用。
+- 表里只列影响训练的键,其余以配置文件为准。
+
+### 14.3 退火这一步改了什么
+
+退火配置相对恒定配置只改了下面几项(配置文件开头的注释也写了),其余完全相同:
+
+```yaml
+exp_name: PLN2uni3t_all287k_b32t6_fp32lr35_wsd60k_a10k
+training:
+  scheduler_type: constant_anneal   # 恒定配置是 constant
+  anneal_from_step: 60000           # 恒定配置没有这一项
+  train_steps: 70000                # 恒定配置是 90000
+  exclude_bg_frac: 0.142857         # 0.142857 x 70000 = 10000,前景窗口仍在第 10,000 步结束
+  resume_ckpt: <退火实验的存档目录>  # 原机器路径,要改
+  require_resume_step: 60000        # 续训起点检查:没有从第 60,000 步续上就报错退出
+```
+
+学习率先保持 3.5e-5,从第 60,000 步开始下降,到第 70,000 步降到 0;前期降得快、后期降得慢。代码在 `utils/training_utils.py` 的 `create_lr_scheduler`(`constant_anneal`):
+
+```
+lr(s) = lr_peak * s / w                           当 s < w
+lr(s) = lr_peak                                   当 w <= s < a
+lr(s) = lr_peak * (1 - sqrt((s - a) / (T - a)))   当 a <= s <= T
+```
+
+字母表:
+- `s`:当前训练步数。
+- `lr(s)`:第 `s` 步实际用的学习率。
+- `lr_peak`:峰值学习率,3.5e-5(`training.lr`)。
+- `w`:热身步数,3,000(`training.warmup`)。
+- `a`:开始退火的步数,60,000(`training.anneal_from_step`)。
+- `T`:总步数,70,000(`training.train_steps`)。
+- `(s - a) / (T - a)`:退火进度,取值 0 到 1。0 表示刚开始退火,学习率还是峰值;1 表示退火结束,学习率为 0。
+- `sqrt`:平方根。用平方根而不是直线,使学习率在退火前期降得快、后期降得慢。
+
+例:第 60,001 步,进度 = 1/10,000,学习率 = 3.5e-5 × (1 − 0.01) = 3.465e-5;第 65,000 步,进度 = 0.5,学习率 = 3.5e-5 × (1 − 0.707) ≈ 1.03e-5。
+
+### 14.4 换机器要准备的
+
+1. **路径**:两个配置写的是原机器路径,按第 5 节表里第一阶段那一行改。
+2. **权重**:从零训练要用 VGGT-1B 初始化编码器,还要感知损失用的 VGG 权重,放法见第 4.2 节。
+3. **训练数据**:all287k,清单是 `data/objaverse_all287k.txt`(287,562 个物体)。Isambard 上的位置见第 4.3 节。HF 数据集仓 `szlgallen/RnG_training_data` 的 `objaverse_all287k_renders/` 有完整备份:719 个分片,共 1.309 TiB;每个分片是装着最多 400 个物体 tar 的大 tar,`manifest.tsv` 记录每个物体在哪一片;仓里的清单与本仓库 `data/objaverse_all287k.txt` 逐字节相同。还原:
+
+```bash
+hf download szlgallen/RnG_training_data --repo-type dataset \
+  --include "objaverse_all287k_renders/shards/*" --local-dir <下载目录>
+for f in <下载目录>/objaverse_all287k_renders/shards/shard_*.tar; do tar -xf "$f" -C <数据根目录>; done
+# 解开后每个物体一个 tar;配置里的 training.root_path / tar_root_path 指向 <数据根目录>
+```
+
+4. **训练中评测的数据**:GSO v1(`gso_sim2real_25v`),在 HF 同一个数据集仓的 `gso_sim2real_25v_eval/gso_sim2real_25v.tar`,解开后把 `training.val_dataset_cfgs.root_dir` 指过去。
+5. **存档清理**:每 2,000 步存一个 16.8 GB 的存档,配置里没有开清理,训到 60k 会攒下 30 个、约 500 GB(原机器上靠外部的守护脚本删旧存档)。建议在配置的 `training:` 下加两行,只留最新 2 个和要用的那一步。这两项只删存档文件,不影响训练:
+   - 恒定配置:`ckpt_keep_latest: 2`、`ckpt_keep_steps: [60000]`
+   - 退火配置:`ckpt_keep_latest: 2`、`ckpt_keep_steps: [70000]`
+
+   按这个设置,同一时刻最多有 4 个存档(存新存档时),磁盘要预留约 70 GB。
+6. **W&B key**:见第 5 节末尾。
+
+### 14.5 怎么跑
+
+**原机器那样的 Slurm 集群(H200,有 `gpu` 分区)**:启动脚本 `scripts_s2/uni3t_train_4gpu.sbatch <配置> [覆盖项…]`。4 卡,单个作业最长 2 天;存档目录里有存档就从最新的一个全状态续训,目录为空就从第 0 步开始。
+
+```bash
+# 第 1 步:恒定臂,从零开始。作业到时限后再提交同一条命令,会从最新存档接着训
+sbatch scripts_s2/uni3t_train_4gpu.sbatch configs/RnGUP_lagernvs_uni3t_b32t6_fp32lr35_const_90k_all287k.yaml
+# 恒定臂存档目录里出现 ckpt_0000000000060000.pt 后,scancel 停掉
+
+# 第 2 步:把 ckpt_60000 放进退火臂的存档目录(复制、硬链接,或从 HF 下载),再启动
+mkdir -p <退火臂存档目录>
+cp <恒定臂存档目录>/ckpt_0000000000060000.pt <退火臂存档目录>/
+sbatch scripts_s2/uni3t_train_4gpu.sbatch configs/RnGUP_lagernvs_uni3t_b32t6_fp32lr35_wsd60k_a10k_all287k.yaml
+# 脚本发现目录里的 ckpt_60000,从第 60,000 步续训,到第 70,000 步结束
+```
+
+- 换集群时要改这个脚本的 Slurm 头和日志路径(第 5 节)。
+- 不要用 `scripts/pln2_train_8h200.sbatch`:它是原仓库启动器的快照,会 cd 到原仓库。
+
+**Isambard**:用 `scripts_s2/s2_train.sbatch <配置> <结束步数>`(4 × GH200,单个作业 24 小时,自动排后继作业接力)。这个脚本是按第二阶段写的,用于第一阶段要注意:
+- 它只在 `$S2_ROOT/checkpoints/<exp_name>` 下找存档、判断续训,所以两个配置的 `training.checkpoint_dir` 和 `validation_out_dir` 要改成这个目录(第二阶段配置就是这样写的)。
+- 目录里有存档时,它会自动加上 `training.resume_ckpt=<该目录> training.require_resume_step=<最新步数>`。
+- 它不接受额外的覆盖项,所以存档清理(第 14.4 节第 5 条)要写进配置。
+- 它只在作业开头检查是否已到结束步数,所以恒定臂过了 60k 还会继续训到当前作业的 24 小时时限。看到 ckpt_60000 后,可以 `touch <存档目录>/RELAY_STOP` 再 `scancel` 当前作业;已排队的后继作业看到 `RELAY_STOP` 会直接退出。
+
+```bash
+sbatch -J s1-const  scripts_s2/s2_train.sbatch <改好的恒定配置> 60000
+# ckpt_60000 出现后:touch <恒定臂存档目录>/RELAY_STOP,再 scancel 当前作业
+mkdir -p <退火臂存档目录> && cp <恒定臂存档目录>/ckpt_0000000000060000.pt <退火臂存档目录>/
+sbatch -J s1-anneal scripts_s2/s2_train.sbatch <改好的退火配置> 70000
+```
+
+### 14.6 怎么确认训对了
+
+- 第 2 步刚开始的日志里应有 `Resumed optimizer and lr_scheduler from …/ckpt_0000000000060000.pt`(原机器的启动脚本在这之前还会打印 `Resume mode: full-state resume from …`)。日志里的学习率只打印到小数点后 6 位,看不出退火;W&B 的 `lr` 曲线应从第 60,000 步开始下降,到第 70,000 步为 0。
+- 训练中评测(每 2,000 步,64 个物体)可以和 W&B 上原来的两个运行(第 14.1 节)按同一步数对照。多卡训练有随机性,数不会逐位相同,应该接近。
+- 训完的 ckpt_70000 按第 13.2 节做全量评测,对照第 13.3 节(原 ckpt_70000:有位姿 PSNR 26.22 dB、LPIPS 0.0977)。
+
+### 14.7 和原始训练是不是同一套代码
+
+原始训练在原仓库 `RnG_lagernvs` 的 uni3t 分支上跑:恒定臂用提交 `6e9a27b`、`c70197f`,退火臂用 `67f3ab5`(这个分支没有公开)。本仓库与它们的关系:
+
+- 两个配置文件与当时用的逐字节相同。
+- 读数据和建模型的代码逐字节相同(`data/dataset_objaverse.py`、`utils/data_utils.py`、`models/renderer.py`、`models/encoder_decoder.py`),所以训练数据、点图真值和模型结构都一样。
+- `train.py`、`model/loss.py`、`model/lagernvs_wrapper.py`、`utils/training_utils.py`、`setup.py` 有改动,新增的都是带开关的功能:一致性损失(`weight_consistency`,默认 0)、只存可训练参数(`save_trainable_only`,默认关)、存档清理(`ckpt_keep_latest`,默认不设)、多种评测模式(`val_modes`,默认只有原来那一种)等。第一阶段配置不开它们,训练计算与当时相同。`cudnn.benchmark` 两边都开着。
+- 启动脚本不同:当时用的是原仓库自己的启动器,本仓库用第 14.5 节的两个脚本。
